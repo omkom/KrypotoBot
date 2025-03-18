@@ -1,3 +1,14 @@
+/**
+ * KryptoBot - Advanced Solana Memecoin Sniping Bot
+ * 
+ * High-performance trading bot for automated detection and trading of promising
+ * memecoin tokens on Solana blockchain with advanced risk management and profit
+ * optimization strategies.
+ * 
+ * @author Advanced Coding AI
+ * @version 2.0.0
+ */
+
 import {
   Connection,
   PublicKey,
@@ -5,12 +16,9 @@ import {
   Transaction,
   sendAndConfirmTransaction,
   LAMPORTS_PER_SOL,
-  SystemProgram
 } from '@solana/web3.js';
 import {
-  getOrCreateAssociatedTokenAccount,
   getAssociatedTokenAddress,
-  ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   NATIVE_MINT
 } from '@solana/spl-token';
@@ -22,22 +30,7 @@ import chalk from 'chalk';
 import bs58 from 'bs58';
 import url from 'url';
 
-// Import the dry run helpers
-import { 
-  isDryRunMode, 
-  dryRunBuy, 
-  dryRunSell, 
-  startSimulatedTrading 
-} from './dry-run-helper.js';
-
-// Log a warning if in dry run mode
-if (isDryRunMode()) {
-  console.log(chalk.yellow('=========================================================='));
-  console.log(chalk.yellow('⚠️  RUNNING IN DRY RUN MODE - NO ACTUAL TRADES WILL OCCUR  ⚠️'));
-  console.log(chalk.yellow('=========================================================='));
-}
-
-// Configuration et variables globales
+// Global configuration and cache
 let CONFIG = {};
 const apiCache = {
   pairs: new Map(),
@@ -45,165 +38,168 @@ const apiCache = {
   prices: new Map(),
 };
 
-
-// Chemins de fichiers
-const API_LOG_FILE = path.join(process.cwd(), 'logs', 'api_calls.log');
+// File paths
 const WRAPPED_SOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
-let BALANCE = 0;
-
-//////////////////////////
-// API MANAGEMENT
-//////////////////////////
+let WALLET_BALANCE = 0;
 
 /**
- * Creates an axios instance with interceptors for API call logging
- * @returns {Object} Configured axios instance
- */
-  function createLoggingAxiosInstance() {
-    // Create a custom axios instance
-    const instance = axios.create({
-      timeout: CONFIG.API_TIMEOUT,
-    });
-    
-    // Request interceptor to log outgoing API calls
-    instance.interceptors.request.use(
-      (config) => {
-        const timestamp = new Date().toISOString();
-        const parsedUrl = url.parse(config.url);
-        const requestId = generateUniqueId();
-        
-        // Create log entry
-        const logEntry = {
-          id: requestId,
-          timestamp,
-          method: config.method?.toUpperCase() || 'GET',
-          hostname: parsedUrl.hostname,
-          path: parsedUrl.pathname,
-          query: parsedUrl.query,
-          startTime: Date.now(),
-          status: 'PENDING',
-        };
-        
-        // Attach requestId to the config for response matching
-        config.requestId = requestId;
-        
-        // Log to file
-        appendToApiLog(logEntry);
-        
-        // Log to console if debug mode is enabled
-        if (CONFIG.DEBUG_MODE) {
-          console.log(chalk.cyan(`[API] → ${logEntry.method} ${logEntry.hostname}${logEntry.path}`));
-        }
-        
-        return config;
-      },
-      (error) => {
-        // Log request errors
-        logApiError('REQUEST_ERROR', error);
-        return Promise.reject(error);
-      }
-    );
-    
-    // Response interceptor to log incoming API responses
-    instance.interceptors.response.use(
-      (response) => {
-        const endTime = Date.now();
-        const requestId = response.config.requestId;
-        
-        // Update log entry
-        const logUpdate = {
-          id: requestId,
-          status: response.status,
-          statusText: response.statusText,
-          endTime: endTime,
-          duration: endTime - response.config.startTime,
-          responseSize: JSON.stringify(response.data).length,
-        };
-        
-        // Log to file
-        updateApiLog(logUpdate);
-        
-        // Log to console if debug mode is enabled
-        if (CONFIG.DEBUG_MODE) {
-          const parsedUrl = url.parse(response.config.url);
-          console.log(
-            chalk.green(
-              `[API] ← ${response.status} ${response.config.method?.toUpperCase() || 'GET'} ` +
-              `${parsedUrl.hostname}${parsedUrl.pathname} (${logUpdate.duration}ms)`
-            )
-          );
-        }
-        
-        return response;
-      },
-      (error) => {
-        // Log response errors
-        const endTime = Date.now();
-        const requestId = error.config?.requestId;
-        
-        if (requestId) {
-          const logUpdate = {
-            id: requestId,
-            status: error.response?.status || 0,
-            statusText: error.response?.statusText || 'ERROR',
-            error: error.message,
-            endTime: endTime,
-            duration: endTime - error.config.startTime,
-          };
-          
-          // Log to file
-          updateApiLog(logUpdate);
-        }
-        
-        // Log to console if debug mode is enabled
-        if (CONFIG.DEBUG_MODE) {
-          const parsedUrl = url.parse(error.config?.url || '');
-          console.log(
-            chalk.red(
-              `[API] ✗ ${error.response?.status || 'ERROR'} ${error.config?.method?.toUpperCase() || 'GET'} ` +
-              `${parsedUrl.hostname || ''}${parsedUrl.pathname || ''} - ${error.message}`
-            )
-          );
-        }
-        
-        return Promise.reject(error);
-      }
-    );
-    //console.warn('‼️ API INIT', instance);
-    return instance;
-  }
-
-/**
- * Generates a unique ID for API call tracking
- * @returns {string} Unique identifier
+ * Generates a unique ID for tracking purposes
+ * @returns {string} Unique identifier (timestamp + random)
  */
 function generateUniqueId() {
   return Date.now().toString(36) + Math.random().toString(36).substring(2, 9);
 }
 
 /**
- * Appends a new API call log entry to the log file
- * @param {Object} logEntry Log entry to append
+ * Creates a custom axios instance with logging and retry logic
+ * @returns {Object} Configured axios instance
  */
-function appendToApiLog(logEntry) {
-  try {
-    fs.appendFileSync(API_LOG_FILE, JSON.stringify(logEntry) + '\n');
-  } catch (error) {
-    console.error(chalk.red(`Error writing to API log: ${error.message}`));
-  }
+function createLoggingAxiosInstance() {
+  // Create custom axios instance with timeout from config
+  const instance = axios.create({
+    timeout: CONFIG.API_TIMEOUT || 10000,
+  });
+  
+  // Request interceptor to log outgoing API calls
+  instance.interceptors.request.use(
+    (config) => {
+      // Parse URL for logging
+      const parsedUrl = url.parse(config.url);
+      const requestId = generateUniqueId();
+      
+      // Create log entry
+      const logEntry = {
+        id: requestId,
+        timestamp: new Date().toISOString(),
+        method: config.method?.toUpperCase() || 'GET',
+        hostname: parsedUrl.hostname,
+        path: parsedUrl.pathname,
+        query: parsedUrl.query,
+        startTime: Date.now(),
+        status: 'PENDING',
+      };
+      
+      // Attach requestId to the config for response matching
+      config.requestId = requestId;
+      
+      // Log to file if API logging file is defined
+      if (CONFIG.API_LOG_FILE) {
+        try {
+          fs.appendFileSync(CONFIG.API_LOG_FILE, JSON.stringify(logEntry) + '\n');
+        } catch (err) {
+          console.error(chalk.red(`Error logging API request: ${err.message}`));
+        }
+      }
+      
+      // Console logging only in debug mode
+      if (CONFIG.DEBUG_MODE) {
+        console.log(chalk.cyan(`[API] → ${logEntry.method} ${logEntry.hostname}${logEntry.path}`));
+      }
+      
+      return config;
+    },
+    (error) => {
+      // Log request errors
+      console.error(chalk.red(`API request error: ${error.message}`));
+      return Promise.reject(error);
+    }
+  );
+  
+  // Response interceptor for logging responses
+  instance.interceptors.response.use(
+    (response) => {
+      // Calculate response time
+      const endTime = Date.now();
+      const requestId = response.config.requestId;
+      const duration = endTime - (response.config.startTime || endTime);
+      
+      // Log in debug mode
+      if (CONFIG.DEBUG_MODE) {
+        const parsedUrl = url.parse(response.config.url);
+        console.log(
+          chalk.green(
+            `[API] ← ${response.status} ${response.config.method?.toUpperCase() || 'GET'} ` +
+            `${parsedUrl.hostname}${parsedUrl.pathname} (${duration}ms)`
+          )
+        );
+      }
+      
+      // Update log file if defined
+      if (CONFIG.API_LOG_FILE && requestId) {
+        try {
+          const logUpdate = {
+            id: requestId,
+            status: response.status,
+            statusText: response.statusText,
+            endTime: endTime,
+            duration: duration,
+            responseSize: JSON.stringify(response.data).length,
+          };
+          
+          // Read and update the specific log entry
+          updateApiLogEntry(logUpdate);
+        } catch (err) {
+          console.error(chalk.red(`Error updating API log: ${err.message}`));
+        }
+      }
+      
+      return response;
+    },
+    (error) => {
+      // Handle and log response errors
+      const endTime = Date.now();
+      const requestId = error.config?.requestId;
+      const duration = endTime - (error.config?.startTime || endTime);
+      
+      // Log to file if config exists
+      if (CONFIG.API_LOG_FILE && requestId) {
+        try {
+          const logUpdate = {
+            id: requestId,
+            status: error.response?.status || 0,
+            statusText: error.response?.statusText || 'ERROR',
+            error: error.message,
+            endTime: endTime,
+            duration: duration,
+          };
+          
+          updateApiLogEntry(logUpdate);
+        } catch (err) {
+          console.error(chalk.red(`Error updating API error log: ${err.message}`));
+        }
+      }
+      
+      // Console log in debug mode
+      if (CONFIG.DEBUG_MODE) {
+        const parsedUrl = url.parse(error.config?.url || '');
+        console.log(
+          chalk.red(
+            `[API] ✗ ${error.response?.status || 'ERROR'} ${error.config?.method?.toUpperCase() || 'GET'} ` +
+            `${parsedUrl.hostname || ''}${parsedUrl.pathname || ''} - ${error.message}`
+          )
+        );
+      }
+      
+      return Promise.reject(error);
+    }
+  );
+  
+  return instance;
 }
 
 /**
- * Updates an existing API call log entry with response data
- * @param {Object} logUpdate Log update data
+ * Updates a specific API log entry in the log file
+ * @param {Object} logUpdate The updated log information
  */
-function updateApiLog(logUpdate) {
+function updateApiLogEntry(logUpdate) {
+  if (!CONFIG.API_LOG_FILE) return;
+  
   try {
     // Read the log file
-    const content = fs.readFileSync(API_LOG_FILE, 'utf8');
+    const content = fs.readFileSync(CONFIG.API_LOG_FILE, 'utf8');
     const lines = content.split('\n').filter(Boolean);
     
-    // Find the matching log entry
+    // Find and update the matching log entry
     let updated = false;
     const updatedLines = lines.map(line => {
       try {
@@ -214,21 +210,21 @@ function updateApiLog(logUpdate) {
         }
         return line;
       } catch (e) {
-        return line;
+        return line; // Keep invalid lines unchanged
       }
     });
     
-    // If we found and updated the entry, write back to the file
+    // Write back if updated, otherwise append as new entry
     if (updated) {
-      fs.writeFileSync(API_LOG_FILE, updatedLines.join('\n') + '\n');
+      fs.writeFileSync(CONFIG.API_LOG_FILE, updatedLines.join('\n') + '\n');
     } else {
-      // If we didn't find the entry, append it as a new one with error note
+      // Add error note for orphaned response
       const errorLog = {
         ...logUpdate,
-        error: 'ORPHANED_RESPONSE',
+        error: logUpdate.error || 'ORPHANED_RESPONSE',
         timestamp: new Date().toISOString(),
       };
-      appendToApiLog(errorLog);
+      fs.appendFileSync(CONFIG.API_LOG_FILE, JSON.stringify(errorLog) + '\n');
     }
   } catch (error) {
     console.error(chalk.red(`Error updating API log: ${error.message}`));
@@ -236,80 +232,97 @@ function updateApiLog(logUpdate) {
 }
 
 /**
- * Logs API errors to both console and log file
- * @param {string} type Type of error
- * @param {Error} error Error object
+ * Creates or clears the API log file
  */
-function logApiError(type, error) {
-  const errorLog = {
-    timestamp: new Date().toISOString(),
-    type,
-    message: error.message,
-    stack: CONFIG.DEBUG_MODE ? error.stack : undefined,
-  };
+function initializeApiLogFile() {
+  if (!CONFIG.API_LOG_FILE) return;
   
   try {
-    fs.appendFileSync(API_LOG_FILE, JSON.stringify(errorLog) + '\n');
-  } catch (e) {
-    console.error(chalk.red(`Failed to write API error to log: ${e.message}`));
-  }
-  
-  if (CONFIG.DEBUG_MODE) {
-    console.error(chalk.red(`[API ERROR] ${type}: ${error.message}`));
+    // Create logs directory if needed
+    const logDir = path.dirname(CONFIG.API_LOG_FILE);
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+    }
+    
+    // In debug mode, clear the log file
+    if (CONFIG.DEBUG_MODE) {
+      fs.writeFileSync(CONFIG.API_LOG_FILE, '');
+      console.log(chalk.yellow(`Debug mode: API log file cleared: ${CONFIG.API_LOG_FILE}`));
+    } else if (!fs.existsSync(CONFIG.API_LOG_FILE)) {
+      // Create empty file if it doesn't exist
+      fs.writeFileSync(CONFIG.API_LOG_FILE, '');
+      console.log(chalk.green(`API log file created: ${CONFIG.API_LOG_FILE}`));
+    }
+  } catch (error) {
+    console.error(chalk.red(`Failed to initialize API log file: ${error.message}`));
   }
 }
 
-  /**
-   * Ensures the API log file exists and is ready for writing
-   * Cleans all logs if in debug mode
-   */
-  function initializeApiLogFile() {
-    try {
-      // Create logs directory if it doesn't exist
-      const logDir = path.dirname(CONFIG.API_LOG_FILE);
-      if (!fs.existsSync(logDir)) {
-        fs.mkdirSync(logDir, { recursive: true });
-      }
-      
-      // In debug mode, clear all logs
-      if (CONFIG.DEBUG_MODE) {
-        fs.writeFileSync(CONFIG.API_LOG_FILE, '');
-        console.log(chalk.yellow(`Debug mode: API log file cleared: ${CONFIG.API_LOG_FILE}`));
-      } else {
-        // Create the log file if it doesn't exist
-        if (!fs.existsSync(CONFIG.API_LOG_FILE)) {
-          fs.writeFileSync(CONFIG.API_LOG_FILE, '');
-          console.log(chalk.green(`API log file created: ${CONFIG.API_LOG_FILE}`));
-        }
-      }
-    } catch (error) {
-      console.error(chalk.red(`Failed to initialize API log file: ${error.message}`));
+/**
+ * Cleans all log files in debug mode
+ */
+function cleanAllLogsInDebugMode() {
+  if (!CONFIG.DEBUG_MODE) return;
+  
+  try {
+    console.log(chalk.yellow('Debug mode: Cleaning all log files...'));
+    
+    // Get logs directory
+    const logDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+      return; // No logs to clean if directory didn't exist
     }
+    
+    // Read all files in the logs directory
+    const files = fs.readdirSync(logDir);
+    let cleanedCount = 0;
+    
+    // Clean each log file
+    files.forEach(file => {
+      // Only clean log files and JSON files (for stats)
+      if (file.endsWith('.log') || file.endsWith('.json') || file.endsWith('.txt')) {
+        const filePath = path.join(logDir, file);
+        
+        // Different handling for JSON files vs log files
+        if (file.endsWith('.json')) {
+          fs.writeFileSync(filePath, '{}');
+        } else {
+          fs.writeFileSync(filePath, '');
+        }
+        
+        cleanedCount++;
+      }
+    });
+    
+    console.log(chalk.yellow(`Debug mode: Cleaned ${cleanedCount} log files`));
+  } catch (error) {
+    console.error(chalk.red(`Error cleaning logs: ${error.message}`));
   }
+}
 
-  // Fonctions principales
-  /**
- * Initialise la configuration du bot à partir des variables d'environnement
- * @returns {Object} Configuration du bot
+/**
+ * Loads bot configuration from environment variables
+ * @returns {Object} Configuration for the bot
  */
 function initConfig() {
-  console.log(chalk.blue('Chargement de la configuration...'));
+  console.log(chalk.blue('Loading configuration...'));
 
-  // Charger les variables d'environnement
+  // Load environment variables
   dotenv.config();
 
-  // Définir la configuration avec valeurs par défaut et variables d'environnement
+  // Build configuration with defaults and environment variables
   const config = {
     // Instance identification
     INSTANCE_ID: process.env.INSTANCE_ID || 'default',
     
-    // Log file paths (now instance-specific)
+    // Log file paths (instance-specific)
     LOG_FILE_PATH: process.env.LOG_FILE_PATH || path.join(process.cwd(), 'logs', 'trade_logs.json'),
     PROFIT_REPORT_PATH: process.env.PROFIT_REPORT_PATH || path.join(process.cwd(), 'logs', 'profit_report.json'),
     ERROR_LOG_PATH: process.env.ERROR_LOG_PATH || path.join(process.cwd(), 'logs', 'error_log.txt'),
     API_LOG_FILE: process.env.API_LOG_FILE || path.join(process.cwd(), 'logs', 'api_calls.log'),
     
-    // Instance metadata tracking
+    // Instance metadata for analytics
     INSTANCE_INFO: {
       id: process.env.INSTANCE_ID || 'default',
       strategy: process.env.STRATEGY_ID || 'default',
@@ -317,15 +330,15 @@ function initConfig() {
       parameters: {}
     },
 
-    // Connexions RPC
+    // RPC Connections
     SOLANA_RPC: process.env.SOLANA_RPC || 'https://api.mainnet-beta.solana.com',
     FALLBACK_RPCS: (process.env.FALLBACK_RPCS || '').split(',').filter(Boolean),
     
-    // APIs externes
+    // External APIs
     DEXSCREENER_API: process.env.DEXSCREENER_API_URL || 'https://api.dexscreener.com/latest/dex',
     JUPITER_API_BASE: process.env.JUPITER_API_BASE || 'https://quote-api.jup.ag/v6',
     
-    // Paramètres de trading
+    // Trading parameters
     SLIPPAGE: Number(process.env.SLIPPAGE || '2'),
     SWAP_AMOUNT: Number(process.env.SWAP_AMOUNT || '0.1'),
     MAX_SOL_PER_TRADE: Number(process.env.MAX_SOL_PER_TRADE || '0.1'),
@@ -335,17 +348,17 @@ function initConfig() {
     TAKE_PROFIT: Number(process.env.TAKE_PROFIT || '25'),
     STOP_LOSS: Number(process.env.STOP_LOSS || '-50'),
     
-    // Paramètres de performance
+    // Performance parameters
     MAX_RETRIES: Number(process.env.MAX_RETRIES || '3'),
     API_TIMEOUT: Number(process.env.API_TIMEOUT || '10000'),
     PRIORITY_FEE: Number(process.env.PRIORITY_FEE || '1000000'),
     
-    // Paramètres d'environnement
+    // Environment settings
     DRY_RUN: process.env.DRY_RUN === 'true',
     ENV: process.env.ENV || 'prod',
     DEBUG_MODE: process.env.DEBUG_MODE === 'true',
     
-    // Liste de tokens à ignorer
+    // Token blacklist
     BLACKLISTED_TOKENS: (process.env.BLACKLISTED_TOKENS || '').split(',').filter(Boolean),
   };
 
@@ -357,7 +370,6 @@ function initConfig() {
     MIN_LIQUIDITY_USD: process.env.MIN_LIQUIDITY_USD || '10000',
     TAKE_PROFIT: process.env.TAKE_PROFIT || '25',
     STOP_LOSS: process.env.STOP_LOSS || '-20',
-    // Add other parameters that may vary between instances
   };
 
   // Create log directory if needed
@@ -378,808 +390,788 @@ function initConfig() {
   const instanceInfoPath = path.join(path.dirname(config.LOG_FILE_PATH), 'instance_info.json');
   fs.writeFileSync(instanceInfoPath, JSON.stringify(config.INSTANCE_INFO, null, 2));
 
-  // Afficher la configuration
-  console.log(chalk.bgBlue('Mode:', config.ENV, config.DRY_RUN ? '(DRY RUN)' : '(PRODUCTION)'));
+  // Display runtime configuration
+  console.log(chalk.bgBlue(`Mode: ${config.ENV}, ${config.DRY_RUN ? '(DRY RUN)' : '(PRODUCTION)'}`));
   console.log(chalk.bgBlue(`RPC: ${config.SOLANA_RPC}`));
   console.log(chalk.bgBlue(`Trading parameters: Slippage: ${config.SLIPPAGE}%, Max per trade: ${config.MAX_SOL_PER_TRADE} SOL`));
   console.log(chalk.bgBlue(`Strategy: TP: ${config.TAKE_PROFIT}%, SL: ${config.STOP_LOSS}%`));
 
   return config;
 }
-  
-    
-  /**
-   * Initialise le portefeuille et la connexion Solana
-   * @returns {Object} Wallet keypair et connexion
-   */
-  async function initializeWallet() {
-    console.log(chalk.blue('Initialisation du portefeuille...'));
-  
-    let privateKey;
-    let rpcUrl;
-    let WALLET;
-  
-    // Déterminer l'environnement
-    if (CONFIG.ENV === 'local') {
-      privateKey = process.env.SOLANA_PRIVATE_KEY_LOCAL;
-      rpcUrl = process.env.SOLANA_RPC_URL_LOCAL || 'https://api.devnet.solana.com';
-  
-      if (!privateKey) {
-        console.log(chalk.yellow('Clé privée locale non trouvée. Génération d\'un nouveau portefeuille...'));
-        WALLET = Keypair.generate();
-        privateKey = bs58.encode(WALLET.secretKey);
-        console.log(`Nouvelle clé privée générée: ${privateKey}`);
-      } else {
-        const decodedPrivateKey = bs58.decode(privateKey);
-        WALLET = Keypair.fromSecretKey(decodedPrivateKey);
-      }
+
+/**
+ * Initializes the wallet and Solana connection
+ * @returns {Promise<Object>} Wallet keypair and connection
+ */
+async function initializeWallet() {
+  console.log(chalk.blue('Initializing wallet...'));
+
+  let privateKey;
+  let rpcUrl;
+  let WALLET;
+
+  // Determine environment
+  if (CONFIG.ENV === 'local') {
+    privateKey = process.env.SOLANA_PRIVATE_KEY_LOCAL;
+    rpcUrl = process.env.SOLANA_RPC_URL_LOCAL || 'https://api.devnet.solana.com';
+
+    if (!privateKey) {
+      console.log(chalk.yellow('Local private key not found. Generating new wallet...'));
+      WALLET = Keypair.generate();
+      privateKey = bs58.encode(WALLET.secretKey);
+      console.log(`New private key generated: ${privateKey}`);
     } else {
-      privateKey = process.env.SOLANA_PRIVATE_KEY_PROD;
-      rpcUrl = CONFIG.SOLANA_RPC;
-  
-      if (!privateKey) {
-        throw new Error('Clé privée de production non trouvée. Définissez SOLANA_PRIVATE_KEY_PROD dans .env');
-      }
-  
       const decodedPrivateKey = bs58.decode(privateKey);
       WALLET = Keypair.fromSecretKey(decodedPrivateKey);
     }
-  
-    console.log(chalk.green(`Portefeuille initialisé avec l'adresse: ${WALLET.publicKey.toBase58()}`));
-  
-    // Initialiser la connexion Solana
-    const connection = new Connection(rpcUrl, {
-      commitment: 'confirmed',
-      disableRetryOnRateLimit: false,
-      confirmTransactionInitialTimeout: 60000
-    });
-  
-    return { WALLET, connection, rpcUrl };
+  } else {
+    privateKey = process.env.SOLANA_PRIVATE_KEY_PROD;
+    rpcUrl = CONFIG.SOLANA_RPC;
+
+    if (!privateKey) {
+      throw new Error('Production private key not found. Set SOLANA_PRIVATE_KEY_PROD in .env');
+    }
+
+    const decodedPrivateKey = bs58.decode(privateKey);
+    WALLET = Keypair.fromSecretKey(decodedPrivateKey);
   }
-  
-  
-  /**
-   * Lit les logs de tokens depuis un fichier JSON
-   * @param {string} logFilePath - Chemin du fichier de log
-   * @returns {Object} Object avec les tokens indexés par adresse
-   */
-  function readTokenLogs(logFilePath) {
-      try {
-        // Vérifier si le fichier existe
-        if (!fs.existsSync(logFilePath)) {
-          console.log(`Création d'un nouveau fichier de log: ${logFilePath}`);
-          
-          // Créer le répertoire parent si nécessaire
-          const dirPath = path.dirname(logFilePath);
-          if (!fs.existsSync(dirPath)) {
-            fs.mkdirSync(dirPath, { recursive: true });
-          }
-          
-          // Initialiser avec une structure vide
-          const initialData = {
-            lastUpdate: new Date().toISOString(),
-            tokens: {},
-            stats: {
-              totalInvested: 0,
-              totalReturned: 0,
-              successfulTrades: 0,
-              failedTrades: 0,
-              startDate: new Date().toISOString()
-            }
-          };
-          
-          fs.writeFileSync(logFilePath, JSON.stringify(initialData, null, 2));
-          return initialData;
-        }
-        
-        // Lire le fichier existant
-        const data = fs.readFileSync(logFilePath, 'utf8');
-        const parsedData = JSON.parse(data);
-        
-        // Assurer une structure cohérente
-        if (!parsedData.stats) {
-          parsedData.stats = {
-            totalInvested: 0,
-            totalReturned: 0,
-            successfulTrades: 0,
-            failedTrades: 0,
-            startDate: parsedData.lastUpdate || new Date().toISOString()
-          };
-        }
-    
-        if (!parsedData.tokens) {
-          parsedData.tokens = {};
-        }
-        
-        return parsedData;
-      } catch (error) {
-        console.error(`Erreur de lecture du fichier JSON (${logFilePath}):`, error);
-        
-        // Créer une sauvegarde du fichier corrompu
-        if (fs.existsSync(logFilePath)) {
-          const backupPath = `${logFilePath}.backup.${Date.now()}`;
-          try {
-            fs.copyFileSync(logFilePath, backupPath);
-            console.log(`Fichier de log corrompu. Sauvegarde créée: ${backupPath}`);
-          } catch (backupError) {
-            console.error(`Impossible de créer une sauvegarde:`, backupError);
-          }
-        }
-        
-        // Retourner une structure vide
-        return {
-          lastUpdate: new Date().toISOString(),
-          tokens: {},
-          stats: {
-            totalInvested: 0,
-            totalReturned: 0,
-            successfulTrades: 0,
-            failedTrades: 0,
-            startDate: new Date().toISOString()
-          }
-        };
+
+  console.log(chalk.green(`Wallet initialized with address: ${WALLET.publicKey.toBase58()}`));
+
+  // Initialize Solana connection
+  const connection = new Connection(rpcUrl, {
+    commitment: 'confirmed',
+    disableRetryOnRateLimit: false,
+    confirmTransactionInitialTimeout: 60000
+  });
+
+  return { WALLET, connection, rpcUrl };
+}
+
+/**
+ * Reads token logs from JSON file with error handling
+ * @param {string} logFilePath Path to the log file
+ * @returns {Object} Object with tokens indexed by address
+ */
+function readTokenLogs(logFilePath) {
+  try {
+    // Check if file exists
+    if (!fs.existsSync(logFilePath)) {
+      console.log(`Creating new log file: ${logFilePath}`);
+      
+      // Create parent directory if needed
+      const dirPath = path.dirname(logFilePath);
+      if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true });
       }
+      
+      // Initialize with empty structure
+      const initialData = {
+        lastUpdate: new Date().toISOString(),
+        tokens: {},
+        stats: {
+          totalInvested: 0,
+          totalReturned: 0,
+          successfulTrades: 0,
+          failedTrades: 0,
+          startDate: new Date().toISOString()
+        }
+      };
+      
+      fs.writeFileSync(logFilePath, JSON.stringify(initialData, null, 2));
+      return initialData;
     }
-  
-  /**
-   * Écrit les logs de tokens dans un fichier JSON
-   * @param {Object} tokenData - Données de token à écrire
-   * @param {string} logFilePath - Chemin du fichier de log
-   */
-  function writeTokenLogs(tokenData, logFilePath) {
+    
+    // Read existing file
+    const data = fs.readFileSync(logFilePath, 'utf8');
+    const parsedData = JSON.parse(data);
+    
+    // Ensure consistent structure
+    if (!parsedData.stats) {
+      parsedData.stats = {
+        totalInvested: 0,
+        totalReturned: 0,
+        successfulTrades: 0,
+        failedTrades: 0,
+        startDate: parsedData.lastUpdate || new Date().toISOString()
+      };
+    }
+
+    if (!parsedData.tokens) {
+      parsedData.tokens = {};
+    }
+    
+    return parsedData;
+  } catch (error) {
+    console.error(`Error reading JSON file (${logFilePath}):`, error);
+    
+    // Create backup of corrupted file
+    if (fs.existsSync(logFilePath)) {
+      const backupPath = `${logFilePath}.backup.${Date.now()}`;
       try {
-        // Mettre à jour l'horodatage
-        tokenData.lastUpdate = new Date().toISOString();
-        
-        // Créer le répertoire s'il n'existe pas
-        const dirPath = path.dirname(logFilePath);
-        if (!fs.existsSync(dirPath)) {
-          fs.mkdirSync(dirPath, { recursive: true });
-        }
-        
-        // Écrire dans le fichier
-        fs.writeFileSync(logFilePath, JSON.stringify(tokenData, null, 2));
-      } catch (error) {
-        console.error('Erreur d\'écriture du fichier JSON:', error);
-        
-        // Essayer d'écrire dans un emplacement alternatif si l'écriture principale échoue
-        try {
-          const altPath = './trade_logs_backup.json';
-          fs.writeFileSync(altPath, JSON.stringify(tokenData, null, 2));
-          console.log(`Logs écrits dans un emplacement alternatif: ${altPath}`);
-        } catch (altError) {
-          console.error('Échec de l\'écriture des logs dans un emplacement alternatif:', altError);
-        }
+        fs.copyFileSync(logFilePath, backupPath);
+        console.log(`Corrupted log file. Backup created: ${backupPath}`);
+      } catch (backupError) {
+        console.error(`Unable to create backup:`, backupError);
       }
     }
     
-    /**
-     * Enregistre un achat de token
-     * @param {string} tokenAddress - Adresse du token
-     * @param {string} tokenName - Nom du token
-     * @param {number} amount - Montant acheté
-     * @param {number} priceSol - Prix en SOL
-     * @param {number} tokensBought - Tokens achetés
-     * @param {Object} metadata - Métadonnées supplémentaires
-     */
-    function logTokenPurchase(tokenAddress, tokenName, amount, priceSol, tokensBought, metadata = {}) {
-      if (!tokenAddress) {
-        console.error('Paramètres manquants pour logTokenPurchase');
-        return;
+    // Return empty structure
+    return {
+      lastUpdate: new Date().toISOString(),
+      tokens: {},
+      stats: {
+        totalInvested: 0,
+        totalReturned: 0,
+        successfulTrades: 0,
+        failedTrades: 0,
+        startDate: new Date().toISOString()
       }
+    };
+  }
+}
+
+/**
+ * Writes token logs to JSON file
+ * @param {Object} tokenData Token data to write
+ * @param {string} logFilePath Path to the log file
+ */
+function writeTokenLogs(tokenData, logFilePath) {
+  try {
+    // Update timestamp
+    tokenData.lastUpdate = new Date().toISOString();
     
-      try {
-        const timestamp = new Date().toISOString();
-        const pricePerToken = tokensBought > 0 ? priceSol / tokensBought : 0;
-        
-        // Lire les données existantes
-        const tokenData = readTokenLogs(CONFIG.LOG_FILE_PATH);
-        
-        // Mettre à jour ou créer une entrée pour ce token
-        if (!tokenData.tokens[tokenAddress]) {
-          // Nouvelle entrée
-          tokenData.tokens[tokenAddress] = {
-            tokenAddress,
-            tokenName,
-            initialAmount: amount,
-            currentAmount: amount,
-            initialInvestment: priceSol,
-            totalSold: 0,
-            totalReceived: 0,
-            avgBuyPrice: pricePerToken,
-            avgSellPrice: 0,
-            firstPurchaseTime: timestamp,
-            lastUpdateTime: timestamp,
-            transactions: [
-              {
-                type: "BUY",
-                amount: tokensBought,
-                priceSOL: priceSol,
-                pricePerToken,
-                timestamp,
-                metadata: Object.keys(metadata).length > 0 ? metadata : undefined
-              }
-            ]
-          };
-          
-          // Mettre à jour les statistiques globales
-          if (tokenData.stats) {
-            tokenData.stats.totalInvested += priceSol;
-          }
-        } else {
-          // Mettre à jour l'entrée existante
-          const token = tokenData.tokens[tokenAddress];
-          
-          token.initialAmount = Number(token.initialAmount || 0) + amount;
-          token.currentAmount = Number(token.currentAmount || 0) + amount;
-          token.initialInvestment = Number(token.initialInvestment || 0) + priceSol;
-          
-          // Mettre à jour le prix d'achat moyen pondéré
-          if (token.initialAmount > 0) {
-            token.avgBuyPrice = token.initialInvestment / token.initialAmount;
-          }
-          
-          token.lastUpdateTime = timestamp;
-          
-          // Ajouter la transaction
-          token.transactions.push({
+    // Create directory if it doesn't exist
+    const dirPath = path.dirname(logFilePath);
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+    
+    // Write to file
+    fs.writeFileSync(logFilePath, JSON.stringify(tokenData, null, 2));
+  } catch (error) {
+    console.error('Error writing JSON file:', error);
+    
+    // Try writing to alternative location if main write fails
+    try {
+      const altPath = './trade_logs_backup.json';
+      fs.writeFileSync(altPath, JSON.stringify(tokenData, null, 2));
+      console.log(`Logs written to alternative location: ${altPath}`);
+    } catch (altError) {
+      console.error('Failed to write logs to alternative location:', altError);
+    }
+  }
+}
+
+/**
+ * Records a token purchase in the log
+ * @param {string} tokenAddress Token address
+ * @param {string} tokenName Token name/symbol
+ * @param {number} amount Amount of tokens acquired
+ * @param {number} priceSol Price paid in SOL
+ * @param {number} tokensBought Tokens bought
+ * @param {Object} metadata Additional metadata
+ */
+function logTokenPurchase(tokenAddress, tokenName, amount, priceSol, tokensBought, metadata = {}) {
+  if (!tokenAddress) {
+    console.error('Missing parameters for logTokenPurchase');
+    return;
+  }
+
+  try {
+    const timestamp = new Date().toISOString();
+    const pricePerToken = tokensBought > 0 ? priceSol / tokensBought : 0;
+    
+    // Read existing data
+    const tokenData = readTokenLogs(CONFIG.LOG_FILE_PATH);
+    
+    // Update or create entry for this token
+    if (!tokenData.tokens[tokenAddress]) {
+      // New entry
+      tokenData.tokens[tokenAddress] = {
+        tokenAddress,
+        tokenName,
+        initialAmount: amount,
+        currentAmount: amount,
+        initialInvestment: priceSol,
+        totalSold: 0,
+        totalReceived: 0,
+        avgBuyPrice: pricePerToken,
+        avgSellPrice: 0,
+        firstPurchaseTime: timestamp,
+        lastUpdateTime: timestamp,
+        transactions: [
+          {
             type: "BUY",
             amount: tokensBought,
             priceSOL: priceSol,
             pricePerToken,
             timestamp,
             metadata: Object.keys(metadata).length > 0 ? metadata : undefined
-          });
-          
-          // Mettre à jour les statistiques globales
-          if (tokenData.stats) {
-            tokenData.stats.totalInvested += priceSol;
           }
-        }
-        
-        // Écrire les données mises à jour
-        writeTokenLogs(tokenData, CONFIG.LOG_FILE_PATH);
-        
-        // Sortie console avec codage couleur
-        if (metadata?.scamDetected) {
-          console.log(chalk.bgRed(`Achat - Token=${tokenName} (${tokenAddress}) | Montant=${amount} | PrixSol=${priceSol} | PrixParToken=${pricePerToken.toFixed(10)} | ARNAQUE DÉTECTÉE`));
-        } else {
-          console.log(chalk.bgBlue(`Achat - Token=${tokenName} (${tokenAddress}) | Montant=${amount} | PrixSol=${priceSol} | PrixParToken=${pricePerToken.toFixed(10)}`));
-          console.log(chalk.blue(`Prix par token: ${pricePerToken.toFixed(10)} SOL | Portefeuille: ${tokenData.tokens[tokenAddress].currentAmount} tokens`));
-        }
-      } catch (error) {
-        console.error('Erreur lors de l\'enregistrement de l\'achat:', error);
-      }
-    }
-    
-    /**
-     * Enregistre une vente de token
-     * @param {string} tokenAddress - Adresse du token
-     * @param {string} tokenName - Nom du token
-     * @param {number} amount - Montant vendu
-     * @param {number} solReceived - SOL reçu
-     * @param {Object} metadata - Métadonnées supplémentaires
-     * @param {boolean} isDryRun - S'il s'agit d'une simulation
-     * @returns {Object} Informations de vente et ROI
-     */
-    function logTokenSale(tokenAddress, tokenName, amount, solReceived, metadata = {}, isDryRun = false) {
-      if (!tokenAddress) {
-        console.error('Paramètres manquants pour logTokenSale');
-        return {
-          success: false,
-          error: "MISSING_PARAMETERS",
-          roi: 0
-        };
-      }
-    
-      try {
-        const timestamp = new Date().toISOString();
-        
-        // Lire les données existantes
-        const tokenData = readTokenLogs(CONFIG.LOG_FILE_PATH);
-        
-        // Vérifier si le token existe dans les logs
-        if (!tokenData.tokens[tokenAddress]) {
-          console.error(`Token ${tokenAddress} non trouvé dans les logs`);
-          return {
-            success: false,
-            error: "TOKEN_NOT_FOUND",
-            roi: 0
-          };
-        }
-        
-        const token = tokenData.tokens[tokenAddress];
-        
-        // S'assurer que nous avons assez de tokens à vendre
-        if (Number(token.currentAmount) < amount) {
-          console.warn(`Avertissement: Tentative de vente de ${amount} tokens mais seulement ${token.currentAmount} disponibles`);
-          amount = Number(token.currentAmount);
-        }
-        
-        // Calculer le prix par token pour cette vente
-        const salePerToken = amount > 0 ? solReceived / amount : 0;
-        
-        // Calculer le ROI pour cette vente spécifique
-        let avgBuyPrice = Number(token.avgBuyPrice) || 0;
-        
-        // Calculer le ROI
-        const roi = avgBuyPrice > 0 ? ((salePerToken - avgBuyPrice) / avgBuyPrice) * 100 : 0;
-        
-        // Mettre à jour les métriques du token
-        token.currentAmount = Number(token.currentAmount) - amount;
-        token.totalSold = Number(token.totalSold || 0) + amount;
-        token.totalReceived = Number(token.totalReceived || 0) + solReceived;
-        
-        // Mettre à jour le prix de vente moyen
-        if (token.totalSold > 0) {
-          token.avgSellPrice = token.totalReceived / token.totalSold;
-        }
-        
-        token.lastUpdateTime = timestamp;
-        
-        // Ajouter la transaction
-        token.transactions.push({
-          type: "SELL",
-          amount,
-          priceSOL: solReceived,
-          pricePerToken: salePerToken,
-          timestamp,
-          roi,
-          isDryRun,
-          metadata: Object.keys(metadata).length > 0 ? metadata : undefined
-        });
-        
-        // Mettre à jour les statistiques globales
-        if (tokenData.stats) {
-          tokenData.stats.totalReturned += solReceived;
-          tokenData.stats.successfulTrades++;
-        }
-        
-        // Écrire les données mises à jour
-        writeTokenLogs(tokenData, CONFIG.LOG_FILE_PATH);
-        
-        // Calculer les métriques globales
-        const totalInvested = Number(token.initialInvestment) || 0;
-        const totalReceived = Number(token.totalReceived) || 0;
-        
-        // Sortie console
-        const dryRunPrefix = isDryRun ? '[SIMULATION] ' : '';
-        
-        // Préparer le message pour le log
-        const saleMessage = `${dryRunPrefix}Vente (ROI ${roi.toFixed(2)}%) - Token=${tokenName} (${tokenAddress}) | ` +
-                         `Montant=${amount} | SolReçu=${solReceived} | ` +
-                         `PrixVente=${salePerToken.toFixed(10)} | PrixAchatMoyen=${avgBuyPrice.toFixed(10)}`;
-        
-        // Couleur basée sur le ROI
-        if (roi > 0) {
-          console.log(chalk.bgGreen(saleMessage));
-          console.log(chalk.green(`${dryRunPrefix}Profit: ${roi.toFixed(2)}% (${solReceived} SOL reçus)`));
-        } else if (roi < 0) {
-          console.log(chalk.bgRed(saleMessage));
-          console.log(chalk.red(`${dryRunPrefix}Perte: ${roi.toFixed(2)}% (${solReceived} SOL reçus)`));
-        } else {
-          console.log(chalk.bgYellow(saleMessage));
-          console.log(chalk.yellow(`${dryRunPrefix}ROI neutre: ${roi.toFixed(2)}% (${solReceived} SOL reçus)`));
-        }
-        
-        return {
-          success: true,
-          tokenAddress,
-          tokenName,
-          amount,
-          solReceived,
-          salePerToken,
-          avgBuyPrice,
-          roi,
-          remainingAmount: token.currentAmount,
-          isDryRun
-        };
-      } catch (error) {
-        console.error('Erreur lors de l\'enregistrement de la vente:', error);
-        return {
-          success: false,
-          error: error.message,
-          roi: 0,
-          isDryRun
-        };
-      }
-    }
-  
-  /**
-   * Obtient des informations sur une paire de tokens
-   * @param {string} chainId - ID de la chaîne (ex: 'solana')
-   * @param {string} tokenAddress - Adresse du token
-   * @param {Object} options - Options additionnelles
-   * @returns {Promise<Object|null>} Informations sur la paire ou null si non trouvée
-   */
-  async function getPairInformation(chainId, tokenAddress, options = {}) {
-      try {
-        // Normaliser l'adresse du token pour la cohérence
-        tokenAddress = tokenAddress.toString().trim();
-        const cacheKey = `${chainId}-${tokenAddress}`;
-        
-        // Vérifier le cache
-        if (!options.force && apiCache.pairs.has(cacheKey)) {
-          const cachedData = apiCache.pairs.get(cacheKey);
-          if (Date.now() - cachedData.timestamp < 60000) { // 1 minute TTL
-            return cachedData.data;
-          }
-        }
-        
-        console.log(`Recherche d'informations pour le token ${tokenAddress} sur ${chainId}`);
-        
-        // Préparer l'URL de l'API
-        const url = `${CONFIG.DEXSCREENER_API}/token-pairs/v1/${chainId}/${tokenAddress}`;
-        console.log(`Requête API: ${url}`);
-        
-        // Effectuer la requête
-        const api = createLoggingAxiosInstance();
-        const response = await api.get(url);
-        
-        // Traiter la réponse
-        if (response.data) {
-          const pairs = response.data;
-          
-          if (Array.isArray(pairs) && pairs.length > 0) {
-            console.log(`${pairs.length} paires trouvées pour ${tokenAddress}`);
-            
-            // Filtrer les paires valides
-            let validPairs = pairs.filter(pair => 
-              pair.baseToken && 
-              pair.baseToken.address.toLowerCase() === tokenAddress.toLowerCase()
-            );
-            
-            // Si aucune paire n'est trouvée comme token de base, essayer de chercher comme token de quote
-            if (validPairs.length === 0) {
-              validPairs = pairs.filter(pair => 
-                pair.quoteToken && 
-                pair.quoteToken.address.toLowerCase() === tokenAddress.toLowerCase()
-              );
-            }
-            
-            if (validPairs.length === 0) {
-              console.log(chalk.red('Aucune paire valide trouvée pour ce token'));
-              return null;
-            }
-            
-            // Trouver la meilleure paire (celle avec la plus grande liquidité)
-            let bestPair = validPairs[0];
-            for (const pair of validPairs) {
-              if (pair.liquidity && bestPair.liquidity) {
-                if ((pair.liquidity.usd || 0) > (bestPair.liquidity.usd || 0)) {
-                  bestPair = pair;
-                }
-              }
-            }
-            
-            console.log(chalk.green(`Meilleure paire trouvée: ${bestPair.pairAddress}`));
-            console.log(chalk.green(`Liquidité: ${bestPair.liquidity?.usd || 'N/A'} USD`));
-            
-            // Normaliser les données
-            const normalizedPair = {
-              ...bestPair,
-              liquidity: bestPair.liquidity || { usd: 0, base: 0, quote: 0 },
-              volume: bestPair.volume || { h24: 0, h6: 0, h1: 0, m5: 0 },
-              priceChange: bestPair.priceChange || { h24: 0, h6: 0, h1: 0, m5: 0 },
-              txns: bestPair.txns || { 
-                h24: { buys: 0, sells: 0 }, 
-                h6: { buys: 0, sells: 0 }, 
-                h1: { buys: 0, sells: 0 }, 
-                m5: { buys: 0, sells: 0 } 
-              },
-              isBaseToken: bestPair.baseToken && 
-                          bestPair.baseToken.address.toLowerCase() === tokenAddress.toLowerCase()
-            };
-            
-            // Mettre en cache les résultats
-            apiCache.pairs.set(cacheKey, {
-              data: normalizedPair,
-              timestamp: Date.now()
-            });
-            
-            // Mettre à jour le cache des prix
-            apiCache.prices.set(tokenAddress, {
-              price: parseFloat(normalizedPair.priceNative) || 0,
-              priceUsd: parseFloat(normalizedPair.priceUsd) || 0,
-              timestamp: Date.now()
-            });
-            
-            return normalizedPair;
-          }
-        }
-        
-        console.log('Format de réponse DexScreener inattendu ou aucune paire trouvée');
-        return null;
-      } catch (error) {
-        console.error(chalk.red(`Erreur lors de la récupération des informations pour ${tokenAddress}: ${error.message}`));
-        return null;
-      }
-    }
-  
-  /**
-   * Calcule le montant à acheter en fonction de la taille du portefeuille
-   * @param {Connection} connection - Connexion Solana
-   * @param {Keypair} wallet - Wallet keypair
-   * @returns {Promise<number>} Montant à dépenser en SOL
-   */
-  async function calculateAmountToBuy(connection, wallet) {
-      console.log(chalk.blue('Calcul du montant à acheter...'));
-    
-      try {
-        // Obtenir le solde du portefeuille
-        BALANCE = await connection.getBalance(wallet.publicKey) / LAMPORTS_PER_SOL;
-        console.log(chalk.green(`Solde du portefeuille: ${BALANCE.toFixed(4)} SOL`));
-        
-        // Calculer le montant à acheter en fonction du pourcentage de risque
-        const amountToBuy = BALANCE * CONFIG.RISK_PERCENTAGE;
-        
-        // Limiter le montant au maximum autorisé par transaction
-        const maxAmountPerTrade = CONFIG.MAX_SOL_PER_TRADE || 0.01;
-        
-        // Retourner le minimum entre le montant calculé et le maximum autorisé
-        const finalAmount = Math.min(amountToBuy, maxAmountPerTrade);
-        console.log(chalk.green(`Montant à acheter calculé: ${finalAmount.toFixed(6)} SOL`));
-        return finalAmount;
-      } catch (error) {
-        console.error(chalk.red(`Erreur lors du calcul du montant à acheter: ${error.message}`));
-        // Retourner le montant par défaut en cas d'erreur
-        return CONFIG.SWAP_AMOUNT;
-      }
-    }
-    
-    /**
-     * Obtient un devis pour un swap via l'API Jupiter
-     * @param {Object} params - Paramètres pour la requête de devis
-     * @returns {Promise<Object>} Devis reçu de l'API Jupiter
-     */
-    async function getJupiterQuote(params) {
-      const { inputMint, outputMint, amount, slippage } = params;
-      const jupiterApiUrl = `${CONFIG.JUPITER_API_BASE}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippage=${slippage}`;
-    
-      console.log(chalk.blue(`Obtention du devis Jupiter: ${jupiterApiUrl}`));
-    
-      try {
-        const api = createLoggingAxiosInstance();
-        const response = await api.get(jupiterApiUrl);
-        const quoteData = response.data;
-    
-        if (quoteData && quoteData.outAmount) {
-          console.log(chalk.green(`Devis reçu avec montant de sortie: ${quoteData.outAmount}`));
-          return quoteData;
-        } else {
-          throw new Error('Réponse de devis invalide: montant de sortie manquant');
-        }
-      } catch (error) {
-        console.error(chalk.red(`Erreur de devis Jupiter: ${error.message}`));
-        throw error;
-      }
-    }
-    
-  /**
-   * Obtient une transaction de swap depuis l'API Jupiter
-   * @param {Object} quote - Devis reçu de l'API Jupiter
-   * @param {string} userPublicKey - Clé publique de l'utilisateur
-   * @returns {Promise<Object>} Transaction de swap reçue de l'API Jupiter
-   */
-  async function getJupiterSwapTransaction(quote, userPublicKey) {
-      const jupiterApiUrl = `${CONFIG.JUPITER_API_BASE}/swap`;
-  
-      console.log(chalk.blue('Demande de transaction de swap à l\'API Jupiter'));
-  
-      try {
-          const response = await axios.post(jupiterApiUrl, {
-          quoteResponse: quote,
-          userPublicKey: userPublicKey
-          }, { timeout: CONFIG.API_TIMEOUT });
-  
-          const swapTransaction = response.data;
-  
-          if (swapTransaction && swapTransaction.swapTransaction) {
-          console.log(chalk.green('Transaction de swap reçue avec succès'));
-          return swapTransaction;
-          } else {
-          throw new Error('Réponse de transaction de swap invalide');
-          }
-      } catch (error) {
-          console.error(chalk.red(`Erreur de transaction de swap Jupiter: ${error.message}`));
-          throw error;
-      }   
-  }
-  
-  /**
-  * Exécute un swap via Jupiter API
-  * @param {PublicKey} inputMint - Adresse du token d'entrée
-  * @param {PublicKey} outputMint - Adresse du token de sortie
-  * @param {BigInt} inputAmount - Montant à échanger (en lamports/unités natives)
-  * @param {number} slippage - Tolérance de glissement (pourcentage)
-  * @param {Connection} connection - Connexion Solana
-  * @param {Keypair} wallet - Wallet keypair
-  * @returns {Promise<Object>} Résultat de la transaction
-  */
-  async function jupiterSwapAndConfirm(inputMint, outputMint, inputAmount, slippage, connection, wallet) {
-      console.log(chalk.blue(`Exécution du swap Jupiter: ${Number(inputAmount) / LAMPORTS_PER_SOL} SOL → Token ${outputMint.toString()}`));
+        ]
+      };
       
-      try {
-        // 1. Obtenir un devis
-        const quoteParams = {
-          inputMint: inputMint.toString(),
-          outputMint: outputMint.toString(),
-          amount: inputAmount.toString(),
-          slippage: slippage.toString(),
-          maxAccounts: 64 // Valeur raisonnable pour éviter les timeouts
-        };
-        
-        const quote = await getJupiterQuote(quoteParams);
-        
-        // 2. Obtenir la transaction de swap
-        const swapTransaction = await getJupiterSwapTransaction(quote, wallet.publicKey.toString());
-        
-        // 3. Décoder et signer la transaction
-        const transaction = Transaction.from(Buffer.from(swapTransaction.swapTransaction, 'base64'));
-        
-        // 4. Ajouter des frais prioritaires si définis
-        if (CONFIG.PRIORITY_FEE > 0) {
-          console.log(chalk.yellow(`Ajout de frais prioritaires: ${CONFIG.PRIORITY_FEE}`));
-          // Logique pour ajouter des frais prioritaires si nécessaire
-        }
-        
-        // 5. Définir les paramètres de la transaction
-        const { blockhash } = await connection.getLatestBlockhash();
-        transaction.recentBlockhash = blockhash;
-        transaction.feePayer = wallet.publicKey;
-        
-        // 6. Signer et envoyer la transaction
-        const signedTransaction = transaction.sign([wallet]);
-        const signature = await connection.sendRawTransaction(signedTransaction.serialize(), {
-          skipPreflight: false,
-          preflightCommitment: 'confirmed',
-          maxRetries: CONFIG.MAX_RETRIES
-        });
-        
-        console.log(chalk.green(`Transaction soumise: ${signature}`));
-        
-        // 7. Confirmer la transaction
-        const confirmation = await connection.confirmTransaction(signature, 'confirmed');
-        
-        console.log(chalk.green(`Transaction confirmée avec succès: ${signature}`));
-        
-        // 8. Retourner les résultats
-        return {
-          success: true,
-          signature,
-          outputAmount: quote.outAmount,
-          inputAmount: inputAmount.toString(),
-          strategy: 'jupiter'
-        };
-      } catch (error) {
-        console.error(chalk.red(`Erreur lors du swap Jupiter: ${error.message}`));
-        
-        // Détection de token frauduleux
-        if (error.message.includes('program not executable') || 
-            error.message.includes('invalid account owner')) {
-          console.warn(chalk.yellow('Token potentiellement frauduleux détecté'));
-          return {
-            success: false,
-            error: error.message,
-            scamDetected: true
-          };
-        }
-        
-        return {
-          success: false,
-          error: error.message
-        };
+      // Update global stats
+      if (tokenData.stats) {
+        tokenData.stats.totalInvested += priceSol;
       }
-     }
-  
-  
-  /**
-   * Évalue un token pour déterminer s'il vaut la peine d'être acheté
-   * @param {Object} pool - Informations sur le pool de token
-   * @returns {boolean} True si le token répond aux critères d'achat
-   */
-  function evaluateToken(pool) {
-      const symbol = pool.baseToken?.symbol || 'Unknown';
-      console.log(chalk.blue(`Évaluation du token: ${symbol}`));
-    
-      // Extraire les métriques
-      const liquidityUsd = pool.liquidity?.usd || 0;
-      const volume24h = pool.volume?.h24 || 0;
-      const priceChange24h = pool.priceChange?.h24 || 0;
-      const tokenAgeDays = pool.pairCreatedAt ? (Date.now() - pool.pairCreatedAt) / (1000 * 60 * 60 * 24) : 0;
-    
-      // Seuils définis dans la configuration
-      const MIN_LIQUIDITY_USD = CONFIG.MIN_LIQUIDITY_USD || 10;
-      const MIN_VOLUME_24H = CONFIG.MIN_VOLUME_24H || 10;
-    
-      // Vérifier les mots-clés suspects dans le nom du token
-      const tokenName = pool.baseToken?.symbol || '';
-      const scamKeywords = ['pump', 'dump', 'elon', 'moon', 'safe', 'doge', 'shib', 'inu', 'airdrop', 'free'];
-      const containsScamKeyword = scamKeywords.some(keyword =>
-        tokenName.toLowerCase().includes(keyword)
-      );
-    
-      // Vérifier les modèles de transaction suspects
-      const txns = pool.txns || { m5: {}, h1: {}, h6: {}, h24: {} };
-      const buySellRatio = (txns.h1.buys || 1) / (txns.h1.sells || 1);
-      const suspiciousBuySellRatio = buySellRatio > 10 || buySellRatio < 0.1;
-    
-      // Compter les signaux d'alarme
-      let redFlagCount = 0;
-      const flags = [];
-    
-      if (containsScamKeyword) {
-        //redFlagCount++;
-        //flags.push('Nom suspect');
+    } else {
+      // Update existing entry
+      const token = tokenData.tokens[tokenAddress];
+      
+      token.initialAmount = Number(token.initialAmount || 0) + amount;
+      token.currentAmount = Number(token.currentAmount || 0) + amount;
+      token.initialInvestment = Number(token.initialInvestment || 0) + priceSol;
+      
+      // Update weighted average buy price
+      if (token.initialAmount > 0) {
+        token.avgBuyPrice = token.initialInvestment / token.initialAmount;
       }
       
-      if (suspiciousBuySellRatio) {
-        redFlagCount++;
-        flags.push('Rapport achat/vente suspect');
-      }
+      token.lastUpdateTime = timestamp;
       
-      if (liquidityUsd < MIN_LIQUIDITY_USD) {
-        //redFlagCount++;
-        //flags.push(`Faible liquidité < ${MIN_LIQUIDITY_USD}`);
-      }
-      
-      if (volume24h < MIN_VOLUME_24H) {
-        //redFlagCount++;
-        //flags.push('Volume 24h faible');
-      }
-    
-      // Log de l'évaluation
-      console.log(chalk.blue(`Évaluation du token ${symbol}:`), {
-        signaux: redFlagCount,
-        contientMotCléSuspect: containsScamKeyword,
-        rapportAchatVenteSuspect: suspiciousBuySellRatio,
-        faibleLiquidité: liquidityUsd < MIN_LIQUIDITY_USD,
-        faibleVolume24h: volume24h < MIN_VOLUME_24H,
+      // Add transaction
+      token.transactions.push({
+        type: "BUY",
+        amount: tokensBought,
+        priceSOL: priceSol,
+        pricePerToken,
+        timestamp,
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined
       });
-    
-      // Rejeter les tokens hautement suspects
-      if (redFlagCount >= 3) {
-        console.log(chalk.yellow(`Token ${symbol} rejeté: ${redFlagCount} indicateurs suspects - ${flags.join(', ')}`));
-        return false;
-      }
-    
-      // Critères d'évaluation
-      const meetsLiquidityCriteria = liquidityUsd >= MIN_LIQUIDITY_USD;
-      const meetsVolumeCriteria = volume24h >= MIN_VOLUME_24H;
-    
-      // Facteurs de qualité
-      const recentBuysM5 = txns.m5?.buys || 0;
-      const recentSellsM5 = txns.m5?.sells || 0;
-      const hasRecentBuyActivity = recentBuysM5 > recentSellsM5;
-      const isRising = priceChange24h > 0;
-    
-      // Décision finale - Un token doit répondre à au moins 2 des critères principaux
-      let criteriaMetCount = 0;
-      if (meetsLiquidityCriteria) criteriaMetCount++;
-      if (meetsVolumeCriteria) criteriaMetCount++;
       
-      // Facteurs de qualité
-      let qualityFactorsCount = 0;
-      if (hasRecentBuyActivity) qualityFactorsCount++;
-      if (isRising) qualityFactorsCount++;
-      
-      if (criteriaMetCount >= 2 || (criteriaMetCount >= 1 && qualityFactorsCount >= 1)) {
-         if(hasRecentBuyActivity){
-              console.log(chalk.green(`Token ${symbol} ACCEPTÉ pour achat`));
-              return true;
-          } else {
-              return false;
-          }   
+      // Update global stats
+      if (tokenData.stats) {
+        tokenData.stats.totalInvested += priceSol;
       }
-    
-      console.log(chalk.red(`Token ${symbol} REJETÉ: ne répond pas aux critères minimum`));
-      return false;
     }
+    
+    // Write updated data
+    writeTokenLogs(tokenData, CONFIG.LOG_FILE_PATH);
+    
+    // Console output with color coding
+    if (metadata?.scamDetected) {
+      console.log(chalk.bgRed(`Purchase - Token=${tokenName} (${tokenAddress}) | Amount=${amount} | PriceSol=${priceSol} | PricePerToken=${pricePerToken.toFixed(10)} | SCAM DETECTED`));
+    } else {
+      console.log(chalk.bgBlue(`Purchase - Token=${tokenName} (${tokenAddress}) | Amount=${amount} | PriceSol=${priceSol} | PricePerToken=${pricePerToken.toFixed(10)}`));
+      console.log(chalk.blue(`Price per token: ${pricePerToken.toFixed(10)} SOL | Wallet: ${tokenData.tokens[tokenAddress].currentAmount} tokens`));
+    }
+  } catch (error) {
+    console.error('Error recording purchase:', error);
+  }
+}
+
+/**
+ * Records a token sale with ROI calculation
+ * @param {string} tokenAddress Token address
+ * @param {string} tokenName Token name/symbol
+ * @param {number} amount Amount sold
+ * @param {number} solReceived SOL received from sale
+ * @param {Object} metadata Additional metadata
+ * @param {boolean} isDryRun Indicates if this is a simulation
+ * @returns {Object} Sale information and ROI
+ */
+function logTokenSale(tokenAddress, tokenName, amount, solReceived, metadata = {}, isDryRun = false) {
+  if (!tokenAddress) {
+    console.error('Missing parameters for logTokenSale');
+    return {
+      success: false,
+      error: "MISSING_PARAMETERS",
+      roi: 0
+    };
+  }
+
+  try {
+    const timestamp = new Date().toISOString();
+    
+    // Read existing data
+    const tokenData = readTokenLogs(CONFIG.LOG_FILE_PATH);
+    
+    // Check if token exists in logs
+    if (!tokenData.tokens[tokenAddress]) {
+      console.error(`Token ${tokenAddress} not found in logs`);
+      return {
+        success: false,
+        error: "TOKEN_NOT_FOUND",
+        roi: 0
+      };
+    }
+    
+    const token = tokenData.tokens[tokenAddress];
+    
+    // Ensure we have enough tokens to sell
+    if (Number(token.currentAmount) < amount) {
+      console.warn(`Warning: Trying to sell ${amount} tokens but only ${token.currentAmount} available`);
+      amount = Number(token.currentAmount);
+    }
+    
+    // Calculate price per token for this sale
+    const salePerToken = amount > 0 ? solReceived / amount : 0;
+    
+    // Calculate ROI for this specific sale
+    let avgBuyPrice = Number(token.avgBuyPrice) || 0;
+    
+    // Calculate ROI
+    const roi = avgBuyPrice > 0 ? ((salePerToken - avgBuyPrice) / avgBuyPrice) * 100 : 0;
+    
+    // Update token metrics
+    token.currentAmount = Number(token.currentAmount) - amount;
+    token.totalSold = Number(token.totalSold || 0) + amount;
+    token.totalReceived = Number(token.totalReceived || 0) + solReceived;
+    
+    // Update average sale price
+    if (token.totalSold > 0) {
+      token.avgSellPrice = token.totalReceived / token.totalSold;
+    }
+    
+    token.lastUpdateTime = timestamp;
+    
+    // Add transaction
+    token.transactions.push({
+      type: "SELL",
+      amount,
+      priceSOL: solReceived,
+      pricePerToken: salePerToken,
+      timestamp,
+      roi,
+      isDryRun,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined
+    });
+    
+    // Update global stats
+    if (tokenData.stats) {
+      tokenData.stats.totalReturned += solReceived;
+      tokenData.stats.successfulTrades++;
+    }
+    
+    // Write updated data
+    writeTokenLogs(tokenData, CONFIG.LOG_FILE_PATH);
+    
+    // Calculate global metrics
+    const totalInvested = Number(token.initialInvestment) || 0;
+    const totalReceived = Number(token.totalReceived) || 0;
+    
+    // Console output
+    const dryRunPrefix = isDryRun ? '[SIMULATION] ' : '';
+    
+    // Prepare log message
+    const saleMessage = `${dryRunPrefix}Sale (ROI ${roi.toFixed(2)}%) - Token=${tokenName} (${tokenAddress}) | ` +
+                       `Amount=${amount} | SolReceived=${solReceived} | ` +
+                       `SalePrice=${salePerToken.toFixed(10)} | AvgBuyPrice=${avgBuyPrice.toFixed(10)}`;
+    
+    // Color based on ROI
+    if (roi > 0) {
+      console.log(chalk.bgGreen(saleMessage));
+      console.log(chalk.green(`${dryRunPrefix}Profit: ${roi.toFixed(2)}% (${solReceived} SOL received)`));
+    } else if (roi < 0) {
+      console.log(chalk.bgRed(saleMessage));
+      console.log(chalk.red(`${dryRunPrefix}Loss: ${roi.toFixed(2)}% (${solReceived} SOL received)`));
+    } else {
+      console.log(chalk.bgYellow(saleMessage));
+      console.log(chalk.yellow(`${dryRunPrefix}Neutral ROI: ${roi.toFixed(2)}% (${solReceived} SOL received)`));
+    }
+    
+    return {
+      success: true,
+      tokenAddress,
+      tokenName,
+      amount,
+      solReceived,
+      salePerToken,
+      avgBuyPrice,
+      roi,
+      remainingAmount: token.currentAmount,
+      isDryRun
+    };
+  } catch (error) {
+    console.error('Error recording sale:', error);
+    return {
+      success: false,
+      error: error.message,
+      roi: 0,
+      isDryRun
+    };
+  }
+}
+
+/**
+ * Gets information about a token pair on DEXs
+ * @param {string} chainId Chain ID (e.g., 'solana')
+ * @param {string} tokenAddress Token address to query
+ * @param {Object} options Additional options
+ * @returns {Promise<Object|null>} Pair information or null if not found
+ */
+async function getPairInformation(chainId, tokenAddress, options = {}) {
+  try {
+    // Normalize token address for consistency
+    tokenAddress = tokenAddress.toString().trim();
+    const cacheKey = `${chainId}-${tokenAddress}`;
+    
+    // Check cache unless force refresh is requested
+    if (!options.force && apiCache.pairs.has(cacheKey)) {
+      const cachedData = apiCache.pairs.get(cacheKey);
+      if (Date.now() - cachedData.timestamp < 60000) { // 1 minute TTL
+        return cachedData.data;
+      }
+    }
+    
+    console.log(`Getting information for token ${tokenAddress} on ${chainId}`);
+    
+    // Prepare API URL
+    const url = `${CONFIG.DEXSCREENER_API}/token-pairs/v1/${chainId}/${tokenAddress}`;
+    console.log(`API request: ${url}`);
+    
+    // Make request
+    const api = createLoggingAxiosInstance();
+    const response = await api.get(url);
+    
+    // Process response
+    if (response.data) {
+      const pairs = response.data;
+      
+      if (Array.isArray(pairs) && pairs.length > 0) {
+        console.log(`${pairs.length} pairs found for ${tokenAddress}`);
+        
+        // Filter valid pairs
+        let validPairs = pairs.filter(pair => 
+          pair.baseToken && 
+          pair.baseToken.address.toLowerCase() === tokenAddress.toLowerCase()
+        );
+        
+        // If no pairs found as base token, try as quote token
+        if (validPairs.length === 0) {
+          validPairs = pairs.filter(pair => 
+            pair.quoteToken && 
+            pair.quoteToken.address.toLowerCase() === tokenAddress.toLowerCase()
+          );
+        }
+        
+        if (validPairs.length === 0) {
+          console.log(chalk.red('No valid pairs found for this token'));
+          return null;
+        }
+        
+        // Find best pair (highest liquidity)
+        let bestPair = validPairs[0];
+        for (const pair of validPairs) {
+          if (pair.liquidity && bestPair.liquidity) {
+            if ((pair.liquidity.usd || 0) > (bestPair.liquidity.usd || 0)) {
+              bestPair = pair;
+            }
+          }
+        }
+        
+        console.log(chalk.green(`Best pair found: ${bestPair.pairAddress}`));
+        console.log(chalk.green(`Liquidity: ${bestPair.liquidity?.usd || 'N/A'} USD`));
+        
+        // Normalize data structure
+        const normalizedPair = {
+          ...bestPair,
+          liquidity: bestPair.liquidity || { usd: 0, base: 0, quote: 0 },
+          volume: bestPair.volume || { h24: 0, h6: 0, h1: 0, m5: 0 },
+          priceChange: bestPair.priceChange || { h24: 0, h6: 0, h1: 0, m5: 0 },
+          txns: bestPair.txns || { 
+            h24: { buys: 0, sells: 0 }, 
+            h6: { buys: 0, sells: 0 }, 
+            h1: { buys: 0, sells: 0 }, 
+            m5: { buys: 0, sells: 0 } 
+          },
+          isBaseToken: bestPair.baseToken && 
+                      bestPair.baseToken.address.toLowerCase() === tokenAddress.toLowerCase()
+        };
+        
+        // Cache results
+        apiCache.pairs.set(cacheKey, {
+          data: normalizedPair,
+          timestamp: Date.now()
+        });
+        
+        // Update price cache
+        apiCache.prices.set(tokenAddress, {
+          price: parseFloat(normalizedPair.priceNative) || 0,
+          priceUsd: parseFloat(normalizedPair.priceUsd) || 0,
+          timestamp: Date.now()
+        });
+        
+        return normalizedPair;
+      }
+    }
+    
+    console.log('Unexpected DexScreener response format or no pairs found');
+    return null;
+  } catch (error) {
+    console.error(chalk.red(`Error getting information for ${tokenAddress}: ${error.message}`));
+    return null;
+  }
+}
+
+/**
+ * Calculates purchase amount based on wallet balance and risk parameters
+ * @param {Connection} connection Solana connection
+ * @param {Keypair} wallet Wallet keypair
+ * @returns {Promise<number>} Amount to spend in SOL
+ */
+async function calculateAmountToBuy(connection, wallet) {
+  console.log(chalk.blue('Calculating purchase amount...'));
+
+  try {
+    // Get wallet balance
+    WALLET_BALANCE = await connection.getBalance(wallet.publicKey) / LAMPORTS_PER_SOL;
+    console.log(chalk.green(`Wallet balance: ${WALLET_BALANCE.toFixed(4)} SOL`));
+    
+    // Calculate amount based on risk percentage
+    const amountToBuy = WALLET_BALANCE * CONFIG.RISK_PERCENTAGE;
+    
+    // Limit to maximum allowed per transaction
+    const maxAmountPerTrade = CONFIG.MAX_SOL_PER_TRADE || 0.01;
+    
+    // Return the minimum of calculated amount and maximum allowed
+    const finalAmount = Math.min(amountToBuy, maxAmountPerTrade);
+    console.log(chalk.green(`Calculated purchase amount: ${finalAmount.toFixed(6)} SOL`));
+    return finalAmount;
+  } catch (error) {
+    console.error(chalk.red(`Error calculating purchase amount: ${error.message}`));
+    // Return default amount in case of error
+    return CONFIG.SWAP_AMOUNT;
+  }
+}
+
+/**
+ * Gets a quote from Jupiter API for token swap
+ * @param {Object} params Parameters for the quote request
+ * @returns {Promise<Object>} Quote data from Jupiter API
+ */
+async function getJupiterQuote(params) {
+  const { inputMint, outputMint, amount, slippage } = params;
+  const jupiterApiUrl = `${CONFIG.JUPITER_API_BASE}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippage=${slippage}`;
+
+  console.log(chalk.blue(`Getting Jupiter quote: ${jupiterApiUrl}`));
+
+  try {
+    const api = createLoggingAxiosInstance();
+    const response = await api.get(jupiterApiUrl);
+    const quoteData = response.data;
+
+    if (quoteData && quoteData.outAmount) {
+      console.log(chalk.green(`Quote received with output amount: ${quoteData.outAmount}`));
+      return quoteData;
+    } else {
+      throw new Error('Invalid quote response: missing output amount');
+    }
+  } catch (error) {
+    console.error(chalk.red(`Jupiter quote error: ${error.message}`));
+    throw error;
+  }
+}
+
+/**
+ * Gets a swap transaction from Jupiter API
+ * @param {Object} quote Quote received from Jupiter API
+ * @param {string} userPublicKey User's public key
+ * @returns {Promise<Object>} Swap transaction from Jupiter API
+ */
+async function getJupiterSwapTransaction(quote, userPublicKey) {
+  const jupiterApiUrl = `${CONFIG.JUPITER_API_BASE}/swap`;
+
+  console.log(chalk.blue('Requesting swap transaction from Jupiter API'));
+
+  try {
+    const response = await axios.post(jupiterApiUrl, {
+      quoteResponse: quote,
+      userPublicKey: userPublicKey
+    }, { timeout: CONFIG.API_TIMEOUT });
+
+    const swapTransaction = response.data;
+
+    if (swapTransaction && swapTransaction.swapTransaction) {
+      console.log(chalk.green('Swap transaction received successfully'));
+      return swapTransaction;
+    } else {
+      throw new Error('Invalid swap transaction response');
+    }
+  } catch (error) {
+    console.error(chalk.red(`Jupiter swap transaction error: ${error.message}`));
+    throw error;
+  }   
+}
+
+/**
+ * Executes a swap via Jupiter API
+ * @param {PublicKey} inputMint Input token address
+ * @param {PublicKey} outputMint Output token address
+ * @param {BigInt} inputAmount Amount to swap (in lamports/native units)
+ * @param {number} slippage Slippage tolerance (percentage)
+ * @param {Connection} connection Solana connection
+ * @param {Keypair} wallet Wallet keypair
+ * @returns {Promise<Object>} Transaction result
+ */
+async function jupiterSwapAndConfirm(inputMint, outputMint, inputAmount, slippage, connection, wallet) {
+  console.log(chalk.blue(`Executing Jupiter swap: ${Number(inputAmount) / LAMPORTS_PER_SOL} SOL → Token ${outputMint.toString()}`));
+  
+  try {
+    // 1. Get quote
+    const quoteParams = {
+      inputMint: inputMint.toString(),
+      outputMint: outputMint.toString(),
+      amount: inputAmount.toString(),
+      slippage: slippage.toString(),
+      maxAccounts: 64 // Reasonable value to avoid timeouts
+    };
+    
+    const quote = await getJupiterQuote(quoteParams);
+    
+    // 2. Get swap transaction
+    const swapTransaction = await getJupiterSwapTransaction(quote, wallet.publicKey.toString());
+    
+    // 3. Decode and sign transaction
+    const transaction = Transaction.from(Buffer.from(swapTransaction.swapTransaction, 'base64'));
+    
+    // 4. Add priority fees if defined
+    if (CONFIG.PRIORITY_FEE > 0) {
+      console.log(chalk.yellow(`Adding priority fee: ${CONFIG.PRIORITY_FEE}`));
+      // Logic to add priority fees if needed
+    }
+    
+    // 5. Set transaction parameters
+    const { blockhash } = await connection.getLatestBlockhash();
+    transaction.recentBlockhash = blockhash;
+    transaction.feePayer = wallet.publicKey;
+    
+    // 6. Sign and send transaction
+    const signedTransaction = transaction.sign([wallet]);
+    const signature = await connection.sendRawTransaction(signedTransaction.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+      maxRetries: CONFIG.MAX_RETRIES
+    });
+    
+    console.log(chalk.green(`Transaction submitted: ${signature}`));
+    
+    // 7. Confirm transaction
+    const confirmation = await connection.confirmTransaction(signature, 'confirmed');
+    
+    console.log(chalk.green(`Transaction confirmed successfully: ${signature}`));
+    
+    // 8. Return results
+    return {
+      success: true,
+      signature,
+      outputAmount: quote.outAmount,
+      inputAmount: inputAmount.toString(),
+      strategy: 'jupiter'
+    };
+  } catch (error) {
+    console.error(chalk.red(`Jupiter swap error: ${error.message}`));
+    
+    // Scam token detection
+    if (error.message.includes('program not executable') || 
+        error.message.includes('invalid account owner')) {
+      console.warn(chalk.yellow('Potential scam token detected'));
+      return {
+        success: false,
+        error: error.message,
+        scamDetected: true
+      };
+    }
+    
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Evaluates a token to determine if it's worth buying
+ * @param {Object} pool Token pool information
+ * @returns {boolean} True if token meets purchase criteria
+ */
+function evaluateToken(pool) {
+  const symbol = pool.baseToken?.symbol || 'Unknown';
+  console.log(chalk.blue(`Evaluating token: ${symbol}`));
+
+  // Extract metrics
+  const liquidityUsd = pool.liquidity?.usd || 0;
+  const volume24h = pool.volume?.h24 || 0;
+  const priceChange24h = pool.priceChange?.h24 || 0;
+  const tokenAgeDays = pool.pairCreatedAt ? (Date.now() - pool.pairCreatedAt) / (1000 * 60 * 60 * 24) : 0;
+
+  // Thresholds from configuration
+  const MIN_LIQUIDITY_USD = CONFIG.MIN_LIQUIDITY_USD || 10;
+  const MIN_VOLUME_24H = CONFIG.MIN_VOLUME_24H || 10;
+
+  // Check for suspicious keywords in token name
+  const tokenName = pool.baseToken?.symbol || '';
+  const scamKeywords = ['pump', 'dump', 'elon', 'moon', 'safe', 'doge', 'shib', 'inu', 'airdrop', 'free'];
+  const containsScamKeyword = scamKeywords.some(keyword =>
+    tokenName.toLowerCase().includes(keyword)
+  );
+
+  // Check suspicious transaction patterns
+  const txns = pool.txns || { m5: {}, h1: {}, h6: {}, h24: {} };
+  const buySellRatio = (txns.h1.buys || 1) / (txns.h1.sells || 1);
+  const suspiciousBuySellRatio = buySellRatio > 10 || buySellRatio < 0.1;
+
+  // Count red flags
+  let redFlagCount = 0;
+  const flags = [];
+
+  if (suspiciousBuySellRatio) {
+    redFlagCount++;
+    flags.push('Suspicious buy/sell ratio');
+  }
+
+  // Log evaluation
+  console.log(chalk.blue(`Evaluation for ${symbol}:`), {
+    flags: redFlagCount,
+    containsScamKeyword,
+    suspiciousBuySellRatio,
+    lowLiquidity: liquidityUsd < MIN_LIQUIDITY_USD,
+    lowVolume24h: volume24h < MIN_VOLUME_24H,
+  });
+
+  // Reject highly suspicious tokens
+  if (redFlagCount >= 3) {
+    console.log(chalk.yellow(`Token ${symbol} rejected: ${redFlagCount} suspicious indicators - ${flags.join(', ')}`));
+    return false;
+  }
+
+  // Evaluation criteria
+  const meetsLiquidityCriteria = liquidityUsd >= MIN_LIQUIDITY_USD;
+  const meetsVolumeCriteria = volume24h >= MIN_VOLUME_24H;
+
+  // Quality factors
+  const recentBuysM5 = txns.m5?.buys || 0;
+  const recentSellsM5 = txns.m5?.sells || 0;
+  const hasRecentBuyActivity = recentBuysM5 > recentSellsM5;
+  const isRising = priceChange24h > 0;
+
+  // Final decision - Token must meet at least 2 main criteria
+  let criteriaMetCount = 0;
+  if (meetsLiquidityCriteria) criteriaMetCount++;
+  if (meetsVolumeCriteria) criteriaMetCount++;
+  
+  // Quality factors
+  let qualityFactorsCount = 0;
+  if (hasRecentBuyActivity) qualityFactorsCount++;
+  if (isRising) qualityFactorsCount++;
+  
+  if (criteriaMetCount >= 2 || (criteriaMetCount >= 1 && qualityFactorsCount >= 1)) {
+    if (hasRecentBuyActivity) {
+      console.log(chalk.green(`Token ${symbol} ACCEPTED for purchase`));
+      return true;
+    }
+  }
+
+  console.log(chalk.red(`Token ${symbol} REJECTED: doesn't meet minimum criteria`));
+  return false;
+}
 
 /**
  * Gets token data from logs
- * @param {string} tokenAddress - Token address to look up
- * @param {string} logFilePath - Path to the log file
+ * @param {string} tokenAddress Token address to look up
+ * @param {string} logFilePath Path to the log file
  * @returns {Object|null} Token data or null if not found
  */
 function getTokenDataFromLogs(tokenAddress, logFilePath) {
@@ -1190,20 +1182,20 @@ function getTokenDataFromLogs(tokenAddress, logFilePath) {
       return null;
     }
     
-    // Read JSON log file
+    // Read log file
     const tokenData = readTokenLogs(logFilePath);
     
-    // Normalize the token address for comparison
+    // Normalize address for comparison
     const normalizedAddress = tokenAddress.toString().toLowerCase();
     
-    // Check if token exists in logs (case-insensitive)
+    // Check for token in logs (case-insensitive)
     if (tokenData.tokens) {
-      // First try exact match
+      // Try exact match first
       if (tokenData.tokens[tokenAddress]) {
         return tokenData.tokens[tokenAddress];
       }
       
-      // Then try case-insensitive match
+      // Try case-insensitive match
       for (const [address, data] of Object.entries(tokenData.tokens)) {
         if (address.toLowerCase() === normalizedAddress) {
           return data;
@@ -1218,280 +1210,255 @@ function getTokenDataFromLogs(tokenAddress, logFilePath) {
   }
 }
 
-
-  /**
-   * Simule une vente de token en utilisant uniquement des données de prix réelles
-   * @param {string} tokenAddress - Adresse du token
-   * @param {string} tokenName - Nom du token
-   * @param {number} amount - Montant à vendre
-   * @param {Connection} connection - Connexion Solana
-   * @param {Keypair} WALLET - Portefeuille
-   * @returns {Promise<Object>} Résultat de la simulation basé sur des données réelles
-   */
-async function simulateSaleWithRealROI(tokenAddress, tokenName, amount, connection, WALLET) {
-  console.log(`[DRY RUN] Simulation de vente avec données réelles pour ${tokenName} (${tokenAddress}), Montant: ${amount}`);
+/**
+ * Simulates a token sale with realistic price impact
+ * @param {string} tokenAddress Token address
+ * @param {string} tokenName Token name/symbol
+ * @param {number} amount Amount to sell
+ * @param {Connection} connection Solana connection
+ * @param {Keypair} wallet Wallet keypair
+ * @returns {Promise<Object>} Simulation result with realistic data
+ */
+async function simulateSaleWithRealROI(tokenAddress, tokenName, amount, connection, wallet) {
+  console.log(`[DRY RUN] Simulating sale with real data for ${tokenName} (${tokenAddress}), Amount: ${amount}`);
   
-  // Identifiant unique pour la simulation
+  // Generate unique ID for simulation
   const mockSignature = `DRY_RUN_SALE_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
   
   try {
-      // Obtenir les informations du token à partir du système de logs JSON
-      const logFilePath = CONFIG.LOG_FILE_PATH;
+    // Get log file path
+    const logFilePath = CONFIG.LOG_FILE_PATH;
+    
+    // 1. Get real purchase price from logs
+    const tokenInfo = getTokenDataFromLogs(tokenAddress, logFilePath);
+    let purchasePricePerToken = 0;
+    let purchaseAmount = 0;
+    let purchaseTimestamp = '';
+    
+    if (tokenInfo) {
+      purchasePricePerToken = tokenInfo.avgBuyPrice || 0;
+      purchaseAmount = tokenInfo.currentAmount || 0;
+      purchaseTimestamp = tokenInfo.firstPurchaseTime || '';
+      console.log(`[DRY RUN] Purchase price from logs: ${purchasePricePerToken} SOL/token`);
+    } else {
+      console.log(`[DRY RUN] Token ${tokenName} not found in logs.`);
+    }
+    
+    // 3. Get real market data
+    const pairInfo = await getPairInformation('solana', tokenAddress);
+    if (!pairInfo || !pairInfo.priceNative) {
+      throw new Error('Unable to get real market data for this token');
+    }
+    
+    // Extract real market data
+    const currentPrice = parseFloat(pairInfo.priceNative);
+    const priceUsd = parseFloat(pairInfo.priceUsd || '0');
+    const liquidityBase = pairInfo.liquidity?.base || 0; // Tokens in pool
+    const liquidityQuote = pairInfo.liquidity?.quote || 0; // SOL in pool
+    const liquidityUsd = pairInfo.liquidity?.usd || 0; // Total value in USD
+    
+    // Recent transactions for trend analysis
+    const txns = pairInfo.txns || { m5: {}, h1: {}, h6: {}, h24: {} };
+    const recentBuys = txns.m5?.buys || 0;
+    const recentSells = txns.m5?.sells || 0;
+    const buyPressure = recentSells > 0 ? recentBuys / recentSells : recentBuys > 0 ? 2 : 1;
+    
+    console.log(`[DRY RUN] Real market data obtained:`);
+    console.log(`- Current price: ${currentPrice} SOL/token (${priceUsd} USD)`);
+    console.log(`- Liquidity: ${liquidityBase} tokens / ${liquidityQuote} SOL (${liquidityUsd} USD)`);
+    console.log(`- Recent transactions (5min): ${recentBuys} buys / ${recentSells} sells`);
+    
+    // 4. Calculate real market impact using constant product formula (x*y=k)
+    let exactMarketImpact = 0;
+    let adjustedPrice = currentPrice;
+    let solReceived = 0;
+    
+    if (liquidityBase > 0 && liquidityQuote > 0) {
+      // Calculate price impact using x*y=k formula with exact pool data
+      const k = liquidityBase * liquidityQuote; // product constant
+      const newTokensInPool = liquidityBase + amount; // tokens after sale
+      const newSolInPool = k / newTokensInPool; // new SOL amount in pool
+      const solExtracted = liquidityQuote - newSolInPool; // SOL you would receive
       
-      // 1. Obtenir le prix d'achat réel à partir des logs
-      const tokenInfo = getTokenDataFromLogs(tokenAddress, logFilePath);
-      let purchasePricePerToken = 0;
-      let purchaseAmount = 0;
-      let purchaseTimestamp = '';
+      // Effective price after impact
+      const effectivePrice = solExtracted / amount;
       
-      if (tokenInfo) {
-          purchasePricePerToken = tokenInfo.avgBuyPrice || 0;
-          purchaseAmount = tokenInfo.currentAmount || 0;
-          purchaseTimestamp = tokenInfo.firstPurchaseTime || '';
-          console.log(`[DRY RUN] Prix d'achat depuis les logs: ${purchasePricePerToken} SOL/token`);
+      // Precise percentage impact
+      exactMarketImpact = ((effectivePrice - currentPrice) / currentPrice) * 100;
+      adjustedPrice = effectivePrice;
+      solReceived = solExtracted;
+      
+      console.log(`[DRY RUN] Real market impact calculation:`);
+      console.log(`- Calculated slippage: ${exactMarketImpact.toFixed(4)}%`);
+      console.log(`- Effective price: ${effectivePrice.toFixed(8)} SOL/token`);
+      console.log(`- SOL to receive: ${solExtracted.toFixed(6)} SOL`);
+    } else {
+      // If exact calculation not possible, use thresholds based on real observations
+      const salePercentOfLiquidity = liquidityBase > 0 ? (amount / liquidityBase) * 100 : 0;
+      console.log(`[DRY RUN] Sale = ${salePercentOfLiquidity.toFixed(2)}% of total liquidity`);
+      
+      // Determine impact based on liquidity percentage
+      if (salePercentOfLiquidity > 50) {
+        exactMarketImpact = -30;
+      } else if (salePercentOfLiquidity > 25) {
+        exactMarketImpact = -20;
+      } else if (salePercentOfLiquidity > 10) {
+        exactMarketImpact = -10;
+      } else if (salePercentOfLiquidity > 5) {
+        exactMarketImpact = -5;
       } else {
-          console.log(`[DRY RUN] Token ${tokenName} non trouvé dans les logs.`);
+        exactMarketImpact = -2;
       }
       
-      // 2. Si aucun prix d'achat n'est trouvé dans les logs, vérifier l'historique des transactions
-      if (purchasePricePerToken <= 0) {
-          const logs = readLogs(logFilePath);
-          for (const log of logs) {
-              if (log.includes(tokenAddress) && log.includes('Purchase')) {
-                  const parts = log.split('|');
-                  
-                  const pricePerTokenIndex = parts.findIndex(part => part.trim().startsWith('PricePerToken='));
-                  if (pricePerTokenIndex >= 0) {
-                      const extractedPrice = parseFloat(parts[pricePerTokenIndex].split('=')[1]) || 0;
-                      if (extractedPrice > 0) {
-                          purchasePricePerToken = extractedPrice;
-                          console.log(`[DRY RUN] Prix d'achat trouvé dans l'historique: ${purchasePricePerToken} SOL/token`);
-                          break;
-                      }
-                  }
-              }
-          }
+      // Adjust based on recent buy pressure
+      if (buyPressure > 2) {
+        // Strong buy pressure reduces negative impact
+        exactMarketImpact *= 0.7;
+      } else if (buyPressure < 0.5) {
+        // Strong sell pressure amplifies negative impact
+        exactMarketImpact *= 1.3;
       }
       
-      // 3. Récupérer les données réelles du marché (pas d'estimation)
-      const pairInfo = await getPairInformation('solana', tokenAddress);
-      if (!pairInfo || !pairInfo.priceNative) {
-          throw new Error('Impossible d\'obtenir les données de marché réelles pour ce token');
-      }
-      
-      // Extraire les données réelles du marché
-      const currentPrice = parseFloat(pairInfo.priceNative);
-      const priceUsd = parseFloat(pairInfo.priceUsd || '0');
-      const liquidityBase = pairInfo.liquidity?.base || 0; // Tokens dans le pool
-      const liquidityQuote = pairInfo.liquidity?.quote || 0; // SOL dans le pool
-      const liquidityUsd = pairInfo.liquidity?.usd || 0; // Valeur totale en USD
-      
-      // Transactions récentes pour analyser les tendances
-      const txns = pairInfo.txns || { m5: {}, h1: {}, h6: {}, h24: {} };
-      const recentBuys = txns.m5?.buys || 0;
-      const recentSells = txns.m5?.sells || 0;
-      const buyPressure = recentSells > 0 ? recentBuys / recentSells : recentBuys > 0 ? 2 : 1;
-      
-      console.log(`[DRY RUN] Données réelles du marché obtenues:`);
-      console.log(`- Prix actuel: ${currentPrice} SOL/token (${priceUsd} USD)`);
-      console.log(`- Liquidité: ${liquidityBase} tokens / ${liquidityQuote} SOL (${liquidityUsd} USD)`);
-      console.log(`- Transactions récentes (5min): ${recentBuys} achats / ${recentSells} ventes`);
-      
-      // 4. Calculer l'impact réel sur le marché en utilisant le modèle de pool de liquidité constant (x*y=k)
-      // Note: Cette formule est basée sur la mécanique réelle des AMMs (Automated Market Makers)
-      let exactMarketImpact = 0;
-      let adjustedPrice = currentPrice;
-      let solReceived = 0;
-      
-      if (liquidityBase > 0 && liquidityQuote > 0) {
-          // Calcul de l'impact sur le prix en utilisant la formule x*y=k avec les données exactes du pool
-          const k = liquidityBase * liquidityQuote; // constante du produit
-          const newTokensInPool = liquidityBase + amount; // tokens après votre vente
-          const newSolInPool = k / newTokensInPool; // nouveau montant de SOL dans le pool
-          const solExtracted = liquidityQuote - newSolInPool; // SOL que vous recevriez
-          
-          // Prix effectif après impact
-          const effectivePrice = solExtracted / amount;
-          
-          // Impact en pourcentage précis
-          exactMarketImpact = ((effectivePrice - currentPrice) / currentPrice) * 100;
-          adjustedPrice = effectivePrice;
-          solReceived = solExtracted;
-          
-          console.log(`[DRY RUN] Calcul d'impact de marché réel:`);
-          console.log(`- Slippage calculé: ${exactMarketImpact.toFixed(4)}%`);
-          console.log(`- Prix effectif: ${effectivePrice.toFixed(8)} SOL/token`);
-          console.log(`- SOL à recevoir: ${solExtracted.toFixed(6)} SOL`);
-      } else {
-          // Si nous ne pouvons pas calculer l'impact exact, utiliser des seuils basés sur des observations réelles
-          const salePercentOfLiquidity = liquidityBase > 0 ? (amount / liquidityBase) * 100 : 0;
-          console.log(`[DRY RUN] Vente = ${salePercentOfLiquidity.toFixed(2)}% de la liquidité totale`);
-          
-          // Détermine l'impact en fonction du pourcentage de liquidité
-          if (salePercentOfLiquidity > 50) {
-              exactMarketImpact = -30;
-          } else if (salePercentOfLiquidity > 25) {
-              exactMarketImpact = -20;
-          } else if (salePercentOfLiquidity > 10) {
-              exactMarketImpact = -10;
-          } else if (salePercentOfLiquidity > 5) {
-              exactMarketImpact = -5;
+      adjustedPrice = currentPrice * (1 + exactMarketImpact / 100);
+      solReceived = amount * adjustedPrice;
+    }
+    
+    // 5. If no purchase price was found, use alternative estimation
+    if (purchasePricePerToken <= 0) {
+      // Use token data to estimate purchase time
+      if (pairInfo.pairCreatedAt) {
+        const pairAge = Date.now() - pairInfo.pairCreatedAt;
+        const pairAgeHours = pairAge / (1000 * 60 * 60);
+        
+        // For very recent tokens (likely purchased recently)
+        if (pairAgeHours < 24) {
+          // Use current price with slight discount as conservative estimate
+          purchasePricePerToken = currentPrice * 0.95;
+          console.log(`[DRY RUN] Conservative estimate based on pair age (${pairAgeHours.toFixed(1)} hours): ${purchasePricePerToken} SOL/token`);
+        } else {
+          // For older tokens, use historical price data if available
+          const priceChange24h = pairInfo.priceChange?.h24 || 0;
+          if (priceChange24h !== 0) {
+            // Estimate 24h ago price based on price change
+            const price24hAgo = currentPrice / (1 + priceChange24h / 100);
+            purchasePricePerToken = price24hAgo;
+            console.log(`[DRY RUN] Estimate based on historical price data: ${purchasePricePerToken} SOL/token`);
           } else {
-              exactMarketImpact = -2;
+            // Last resort: use a reasonable but low value
+            purchasePricePerToken = currentPrice * 0.9;
+            console.log(`[DRY RUN] Default estimate: ${purchasePricePerToken} SOL/token`);
           }
-          
-          // Ajustement basé sur la pression d'achat récente
-          if (buyPressure > 2) {
-              // Forte pression d'achat réduit l'impact négatif
-              exactMarketImpact *= 0.7;
-          } else if (buyPressure < 0.5) {
-              // Forte pression de vente amplifie l'impact négatif
-              exactMarketImpact *= 1.3;
-          }
-          
-          adjustedPrice = currentPrice * (1 + exactMarketImpact / 100);
-          solReceived = amount * adjustedPrice;
-      }
-      
-      // 5. Si aucun prix d'achat n'a été trouvé après toutes les tentatives, utiliser une approche alternative
-      if (purchasePricePerToken <= 0) {
-          // Utiliser les données du jeton lui-même pour estimer le moment de l'achat
-          if (pairInfo.pairCreatedAt) {
-              const pairAge = Date.now() - pairInfo.pairCreatedAt;
-              const pairAgeHours = pairAge / (1000 * 60 * 60);
-              
-              // Pour les tokens très récents (probablement achetés récemment)
-              if (pairAgeHours < 24) {
-                  // Utiliser le prix actuel avec un léger rabais comme estimation conservatrice
-                  purchasePricePerToken = currentPrice * 0.95;
-                  console.log(`[DRY RUN] Estimation conservatrice basée sur l'âge du pair (${pairAgeHours.toFixed(1)} heures): ${purchasePricePerToken} SOL/token`);
-              } else {
-                  // Pour les tokens plus anciens, utiliser les données de prix historiques si disponibles
-                  const priceChange24h = pairInfo.priceChange?.h24 || 0;
-                  if (priceChange24h !== 0) {
-                      // Estimer le prix d'il y a 24h basé sur le changement de prix
-                      const price24hAgo = currentPrice / (1 + priceChange24h / 100);
-                      purchasePricePerToken = price24hAgo;
-                      console.log(`[DRY RUN] Estimation basée sur les données de prix historiques: ${purchasePricePerToken} SOL/token`);
-                  } else {
-                      // Dernier recours: utiliser une valeur basse mais réaliste
-                      purchasePricePerToken = currentPrice * 0.9;
-                      console.log(`[DRY RUN] Estimation par défaut: ${purchasePricePerToken} SOL/token`);
-                  }
-              }
-          } else {
-              // Valeur minimale sécurisée si tout échoue
-              purchasePricePerToken = currentPrice * 0.9;
-              console.log(`[DRY RUN] Impossible de déterminer un prix d'achat précis, utilisation d'une estimation: ${purchasePricePerToken} SOL/token`);
-          }
-      }
-      
-      // 6. Calculer le ROI et les métriques finales
-      const purchaseValue = purchasePricePerToken * amount;
-      const roi = purchaseValue > 0 ? ((solReceived - purchaseValue) / purchaseValue) * 100 : 0;
-      
-      // Calculer la durée de détention
-      let holdingTime = "Durée inconnue";
-      let holdingMinutes = 0;
-      if (purchaseTimestamp) {
-          const purchaseDate = new Date(purchaseTimestamp);
-          const currentDate = new Date();
-          const diffMs = currentDate - purchaseDate;
-          holdingMinutes = Math.floor(diffMs / 60000);
-          holdingTime = `${holdingMinutes} minute(s)`;
-      }
-      
-      // 7. Enregistrer la vente simulée dans les logs
-      try {
-          logTokenSale(
-              tokenAddress, 
-              tokenName, 
-              amount, 
-              solReceived, 
-              new Date().toISOString(),
-              mockSignature,
-              { 
-                  simulation: true,
-                  marketImpact: exactMarketImpact,
-                  realPrice: currentPrice,
-                  adjustedPrice: adjustedPrice,
-                  liquidityData: {
-                      baseTokens: liquidityBase,
-                      quoteSOL: liquidityQuote,
-                      usdValue: liquidityUsd
-                  },
-                  buyPressure: buyPressure
-              },
-              logFilePath,
-              true // isDryRun
-          );
-      } catch (logError) {
-          console.error('[DRY RUN] Erreur lors de la mise à jour des logs:', logError.message);
-      }
-      
-      // 8. Déterminer si la vente est recommandée
-      const isPositiveROI = roi > 0;
-      const isSignificantROI = roi > 100; // 100% considéré comme significatif
-      const isLongHold = holdingMinutes > 5; // 5 minutes considéré comme long
-      
-      let saleRecommendation = '';
-      if (isPositiveROI && isSignificantROI) {
-          saleRecommendation = 'VENTE RECOMMANDÉE: ROI significatif';
-      } else if (isPositiveROI && isLongHold) {
-          saleRecommendation = 'VENTE RECOMMANDÉE: ROI positif après détention prolongée';
-      } else if (roi < -10) {
-          saleRecommendation = 'VENTE RECOMMANDÉE: Limiter les pertes';
-      } else if (exactMarketImpact < -20 && roi > 0) {
-          saleRecommendation = 'VENTE PARTIELLE RECOMMANDÉE: Impact de marché élevé';
-      } else if (roi > 0) {
-          saleRecommendation = 'VENTE POSSIBLE: ROI positif mais faible';
+        }
       } else {
-          saleRecommendation = 'MAINTENIR LA POSITION: Attendre une meilleure opportunité';
+        // Minimum safe value if all else fails
+        purchasePricePerToken = currentPrice * 0.9;
+        console.log(`[DRY RUN] Unable to determine precise purchase price, using estimate: ${purchasePricePerToken} SOL/token`);
       }
-      
-      console.log(`[DRY RUN] ${saleRecommendation}`);
-      //console.log(`>>>> [DRY RUN] Simulation de vente réussie pour ${tokenName} (${tokenAddress})`);
-      
-      // 9. Créer un rapport détaillé
-      return {
-          success: true,
-          tokenAddress,
-          tokenName,
-          amount,
-          purchasePricePerToken,
-          currentPricePerToken: currentPrice,
-          adjustedPricePerToken: adjustedPrice,
+    }
+    
+    // 6. Calculate ROI and final metrics
+    const purchaseValue = purchasePricePerToken * amount;
+    const roi = purchaseValue > 0 ? ((solReceived - purchaseValue) / purchaseValue) * 100 : 0;
+    
+    // Calculate holding time
+    let holdingTime = "Unknown duration";
+    let holdingMinutes = 0;
+    if (purchaseTimestamp) {
+      const purchaseDate = new Date(purchaseTimestamp);
+      const currentDate = new Date();
+      const diffMs = currentDate - purchaseDate;
+      holdingMinutes = Math.floor(diffMs / 60000);
+      holdingTime = `${holdingMinutes} minute(s)`;
+    }
+    
+    // 7. Log simulated sale
+    try {
+      logTokenSale(
+        tokenAddress, 
+        tokenName, 
+        amount, 
+        solReceived, 
+        { 
+          simulation: true,
           marketImpact: exactMarketImpact,
-          purchaseValue,
-          saleValue: solReceived,
-          roi,
-          holdingTime,
-          holdingMinutes,
-          timestamp: new Date().toISOString(),
-          signature: mockSignature,
-          recommendation: saleRecommendation,
-          marketData: {
-              liquidityBase,
-              liquidityQuote,
-              liquidityUsd,
-              recentBuys,
-              recentSells,
-              buyPressure
-          }
-      };
+          realPrice: currentPrice,
+          adjustedPrice: adjustedPrice,
+          liquidityData: {
+            baseTokens: liquidityBase,
+            quoteSOL: liquidityQuote,
+            usdValue: liquidityUsd
+          },
+          buyPressure: buyPressure
+        },
+        true // isDryRun
+      );
+    } catch (logError) {
+      console.error('[DRY RUN] Error updating logs:', logError.message);
+    }
+    
+    // 8. Determine if sale is recommended
+    const isPositiveROI = roi > 0;
+    const isSignificantROI = roi > 100; // 100% considered significant
+    const isLongHold = holdingMinutes > 5; // 5 minutes considered long
+    
+    let saleRecommendation = '';
+    if (isPositiveROI && isSignificantROI) {
+      saleRecommendation = 'SALE RECOMMENDED: Significant ROI';
+    } else if (isPositiveROI && isLongHold) {
+      saleRecommendation = 'SALE RECOMMENDED: Positive ROI after extended holding';
+    } else if (roi < -10) {
+      saleRecommendation = 'SALE RECOMMENDED: Limit losses';
+    } else if (exactMarketImpact < -20 && roi > 0) {
+      saleRecommendation = 'PARTIAL SALE RECOMMENDED: High market impact';
+    } else if (roi > 0) {
+      saleRecommendation = 'POSSIBLE SALE: Positive but low ROI';
+    } else {
+      saleRecommendation = 'HOLD POSITION: Wait for better opportunity';
+    }
+    
+    console.log(`[DRY RUN] ${saleRecommendation}`);
+    
+    // 9. Create detailed report
+    return {
+      success: true,
+      tokenAddress,
+      tokenName,
+      amount,
+      purchasePricePerToken,
+      currentPricePerToken: currentPrice,
+      adjustedPricePerToken: adjustedPrice,
+      marketImpact: exactMarketImpact,
+      purchaseValue,
+      saleValue: solReceived,
+      roi,
+      holdingTime,
+      holdingMinutes,
+      timestamp: new Date().toISOString(),
+      signature: mockSignature,
+      recommendation: saleRecommendation,
+      marketData: {
+        liquidityBase,
+        liquidityQuote,
+        liquidityUsd,
+        recentBuys,
+        recentSells,
+        buyPressure
+      }
+    };
   } catch (error) {
-      console.error('[DRY RUN] Erreur lors de la simulation de vente:', error);
-      return {
-          success: false,
-          tokenAddress,
-          tokenName,
-          amount,
-          error: error.message,
-          timestamp: new Date().toISOString(),
-          signature: mockSignature
-      };
+    console.error('[DRY RUN] Error simulating sale:', error);
+    return {
+      success: false,
+      tokenAddress,
+      tokenName,
+      amount,
+      error: error.message,
+      timestamp: new Date().toISOString(),
+      signature: mockSignature
+    };
   }
 }
+
 /**
  * Sells all tokens in the wallet when the script is stopped
  * @param {Connection} connection - Solana connection
@@ -1895,8 +1862,8 @@ function setupExitHandlers(connection, wallet) {
             }
             
             const tokenAccountPubkey = tokenAccounts.value[0].pubkey;
-            BALANCE = await connection.getTokenAccountBalance(tokenAccountPubkey);
-            return Number(BALANCE.value.amount) || 0;
+            WALLET_BALANCE = await connection.getTokenAccountBalance(tokenAccountPubkey);
+            return Number(WALLET_BALANCE.value.amount) || 0;
           } catch (error) {
             console.error(`Erreur lors de la vérification du solde: ${error.message}`);
             return 0;
@@ -2302,10 +2269,10 @@ function setupExitHandlers(connection, wallet) {
         console.log(chalk.bgRed('Démarrage de la surveillance continue...'));
         
         // Vérifier le solde du portefeuille
-        BALANCE = await connection.getBalance(wallet.publicKey) / LAMPORTS_PER_SOL;
-        console.log(chalk.green(`Solde du portefeuille: ${BALANCE.toFixed(4)} SOL`));
+        WALLET_BALANCE = await connection.getBalance(wallet.publicKey) / LAMPORTS_PER_SOL;
+        console.log(chalk.green(`Solde du portefeuille: ${WALLET_BALANCE.toFixed(4)} SOL`));
         
-        if (BALANCE < 0.05) {
+        if (WALLET_BALANCE < 0.05) {
           console.log(chalk.red('Solde insuffisant pour le trading. Minimum recommandé: 0.05 SOL'));
           throw new Error('Solde insuffisant pour le trading');
         }
@@ -3318,8 +3285,8 @@ function setupExitHandlers(connection, wallet) {
       let tradesExecuted = 0;
       
       // Vérifier le solde disponible
-      BALANCE = await connection.getBalance(wallet.publicKey) / LAMPORTS_PER_SOL;
-      if (BALANCE < 0.1) {
+      WALLET_BALANCE = await connection.getBalance(wallet.publicKey) / LAMPORTS_PER_SOL;
+      if (WALLET_BALANCE < 0.1) {
         console.log(chalk.yellow('Solde trop faible pour le trading (<0.1 SOL). Passage cette session.'));
         return;
       }
@@ -3575,49 +3542,6 @@ function setupExitHandlers(connection, wallet) {
     
     return rebuyOpportunities;
   }
-  
-/**
- * Cleans all log files when in debug mode
- */
-function cleanAllLogsInDebugMode() {
-  if (!CONFIG.DEBUG_MODE) return;
-  
-  try {
-    console.log(chalk.yellow('Debug mode: Cleaning all log files...'));
-    
-    // Get the logs directory
-    const logDir = path.join(process.cwd(), 'logs');
-    if (!fs.existsSync(logDir)) {
-      fs.mkdirSync(logDir, { recursive: true });
-      return; // No logs to clean if directory didn't exist
-    }
-    
-    // Read all files in the logs directory
-    const files = fs.readdirSync(logDir);
-    let cleanedCount = 0;
-    
-    // Clean each log file
-    files.forEach(file => {
-      // Only clean log files and JSON files (for stats)
-      if (file.endsWith('.log') || file.endsWith('.json') || file.endsWith('.txt')) {
-        const filePath = path.join(logDir, file);
-        
-        // Check if it's a stats file (JSON)
-        if (file.endsWith('.json')) {
-          fs.writeFileSync(filePath, '{}');
-        } else {
-          fs.writeFileSync(filePath, '');
-        }
-        
-        cleanedCount++;
-      }
-    });
-    
-    console.log(chalk.yellow(`Debug mode: Cleaned ${cleanedCount} log files`));
-  } catch (error) {
-    console.error(chalk.red(`Error cleaning logs: ${error.message}`));
-  }
-}
 
 /**
  * Fonction principale
@@ -3649,8 +3573,8 @@ async function main() {
     console.log(chalk.green(`Connexion RPC: ${rpcUrl}`));
     
     // Vérifier le solde du portefeuille
-    BALANCE = await connection.getBalance(WALLET.publicKey) / LAMPORTS_PER_SOL;
-    console.log(chalk.green(`Solde du portefeuille: ${BALANCE} SOL`));
+    WALLET_BALANCE = await connection.getBalance(WALLET.publicKey) / LAMPORTS_PER_SOL;
+    console.log(chalk.green(`Solde du portefeuille: ${WALLET_BALANCE} SOL`));
 
     // Démarrer la surveillance et le trading
     await monitorAndTrade(connection, WALLET);
