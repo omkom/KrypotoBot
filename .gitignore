@@ -1,0 +1,88 @@
+# Dependency directories
+node_modules/
+package-lock.json
+yarn.lock
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Log files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Trading logs and data
+trade_logs.json
+profit_report.json
+performance_analysis.json
+error_log.txt
+api_calls.log
+
+# Blockchain wallets and keys
+*.key
+*.pem
+wallet.json
+keypair.json
+
+# Build artifacts
+dist/
+build/
+dashboard/build/
+dashboard/node_modules/
+
+# Docker volumes
+docker-volumes/
+
+# Instance specific files
+logs/instances/
+logs/analysis/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+.thumbs.db
+._*
+
+# Editor directories and files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Temporary files
+.tmp/
+.temp/
+*.tmp
+*.temp
+
+# Debug
+.debug/
+debug.log
+
+# MongoDB data
+mongo-data/
+
+# Redis data
+redis-data/
+
+# Grafana
+grafana/data/
+
+# Prometheus
+prometheus/data/
+
+# Temporary fix scripts
+fix-*.sh
+*-fix.sh
+
+# Backup files
+*.bak
+*.backup
+*~

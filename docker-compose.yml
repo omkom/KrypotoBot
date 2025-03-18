@@ -1,0 +1,335 @@
+version: '3.8'
+
+services:
+  volumes-setup:
+    image: alpine:latest
+    container_name: memecoin-volumes-setup
+    command: >
+      sh -c "
+        mkdir -p /logs/instances /logs/analysis &&
+        chmod -R 777 /logs &&
+        echo 'Volume permissions fixed!'
+      "
+    volumes:
+      - shared-logs:/logs
+    restart: "no"
+
+  # Core trading bot engine
+  trading-core:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.core
+    image: memecoin-trading-core
+    container_name: memecoin-trading-core
+    restart: unless-stopped
+    depends_on:
+      - volumes-setup  # Make sure volumes-setup runs first
+      - redis
+      - mongodb
+    volumes:
+      - ./:/app
+      - shared-logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - INSTANCE_ID=main
+      - LOG_FILE_PATH=/app/logs/trade_logs.json
+      - PROFIT_REPORT_PATH=/app/logs/profit_report.json
+      - ERROR_LOG_PATH=/app/logs/error_log.txt
+      - API_LOG_FILE=/app/logs/api_calls.log
+    env_file:
+      - .env
+    command: node index.js
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/trade_logs.json') } catch(e) { process.exit(1) }"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Profit tracker service - analyzes trading performance
+  profit-tracker:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.analyzer
+    image: memecoin-profit-tracker
+    container_name: memecoin-profit-tracker
+    restart: unless-stopped
+    volumes:
+      - shared-logs:/app/logs
+    environment:
+      - CHECK_INTERVAL=10000
+      - LOG_FILE_PATH=/app/logs/trade_logs.json
+      - PROFIT_REPORT_PATH=/app/logs/profit_report.json
+    env_file:
+      - .env
+    command: node profit-tracker.js
+    networks:
+      - trading-network
+    depends_on:
+      trading-core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/profit_report.json') } catch(e) { process.exit(1) }"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Instance manager - handles multiple trading bot instances
+  instance-manager:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.manager
+    image: memecoin-instance-manager
+    container_name: memecoin-instance-manager
+    restart: unless-stopped
+    volumes:
+      - shared-logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock  # Allows creating new containers
+    environment:
+      - BASE_LOG_DIR=/app/logs/instances
+      - PERFORMANCE_LOG=/app/logs/performance_analysis.json
+      - MAX_CONCURRENT_INSTANCES=5
+      - DEBUG_MODE=false
+    env_file:
+      - .env
+    command: node instance-manager.js
+    networks:
+      - trading-network
+    depends_on:
+      trading-core:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/performance_analysis.json') } catch(e) { process.exit(1) }"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+  # Performance analyzer - advanced analytics engine
+  performance-analyzer:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.analyzer
+    image: memecoin-performance-analyzer
+    container_name: memecoin-performance-analyzer
+    restart: unless-stopped
+    volumes:
+      - shared-logs:/app/logs
+    environment:
+      - PERFORMANCE_LOG=/app/logs/performance_analysis.json
+      - INSTANCES_DIR=/app/logs/instances
+      - OUTPUT_DIR=/app/logs/analysis
+      - DEBUG=false
+    env_file:
+      - .env
+    command: node performance-analyzer.js
+    networks:
+      - trading-network
+    depends_on:
+      profit-tracker:
+        condition: service_healthy
+      instance-manager:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/analysis') } catch(e) { process.exit(1) }"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Monitoring API - provides data for the dashboard
+  monitoring-api:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.api
+    image: memecoin-monitoring-api
+    container_name: memecoin-monitoring-api
+    restart: unless-stopped
+    volumes:
+      - shared-logs:/app/logs
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - LOG_DIR=/app/logs
+      - MONGO_URI=mongodb://${MONGO_USER:-memecoin}:${MONGO_PASSWORD:-securepassword}@mongodb:27017/tradingbot
+      - REDIS_URI=redis://default:${REDIS_PASSWORD:-redispassword}@redis:6379
+    env_file:
+      - .env
+    command: node monitoring-api.js
+    networks:
+      - trading-network
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Dashboard web interface
+  dashboard:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.dashboard
+    image: memecoin-dashboard
+    container_name: memecoin-dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      - API_URL=http://monitoring-api:3000
+      - NODE_OPTIONS=--legacy-peer-deps
+      - NODE_ENV=production
+    networks:
+      - trading-network
+    depends_on:
+      monitoring-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # MongoDB for persistent storage
+  mongodb:
+    image: mongo:latest
+    container_name: memecoin-mongodb
+    restart: unless-stopped
+    volumes:
+      - mongodb-data:/data/db
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:-memecoin}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:-securepassword}
+      - MONGO_INITDB_DATABASE=tradingbot
+    networks:
+      - trading-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh mongodb:27017/tradingbot --quiet
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    command: ["--auth"]
+
+  # Redis for caching and pub/sub messaging
+  redis:
+    image: redis:alpine
+    container_name: memecoin-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redispassword}
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: memecoin-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Grafana for advanced visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: memecoin-grafana
+    restart: unless-stopped
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    networks:
+      - trading-network
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Node exporter for system metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: memecoin-node-exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "9100:9100"
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  shared-logs:
+    name: memecoin_shared_logs
+  mongodb-data:
+    name: memecoin_mongodb_data
+  redis-data:
+    name: memecoin_redis_data
+  prometheus-data:
+    name: memecoin_prometheus_data
+  grafana-data:
+    name: memecoin_grafana_data
+
+networks:
+  trading-network:
+    name: memecoin_network
+    driver: bridge
