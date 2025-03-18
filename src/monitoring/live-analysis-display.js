@@ -10,12 +10,12 @@ import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import { createTable, readJsonFile } from './token-analyzer-utils.js';
-import { gatherInstanceData } from '../analyzers/performance-analyzer.js';
-import { analyzeOverallStrategyPerformance, extractTransactions } from '../analyzers/strategy-analyzer.js';
+import { gatherInstanceData } from './performance-analyzer.js';
+import { analyzeOverallStrategyPerformance, extractTransactions } from './strategy-analyzer.js';
 
-// Configuration - Use environment variables for consistent paths
+// Configuration
 const CONFIG = {
-  TRADE_LOG_PATH: process.env.LOG_FILE_PATH || path.join(process.cwd(), 'logs', 'trade_logs.json'),
+  TRADE_LOG_PATH: process.env.TRADE_LOG_PATH || path.join(process.cwd(), 'logs', 'trade_logs.json'),
   PROFIT_REPORT_PATH: process.env.PROFIT_REPORT_PATH || path.join(process.cwd(), 'logs', 'profit_report.json'),
   UPDATE_INTERVAL: parseInt(process.env.LIVE_UPDATE_INTERVAL || '5000'),
   MAX_RECENT_TRADES: parseInt(process.env.MAX_RECENT_TRADES || '10'),
