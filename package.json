@@ -12,7 +12,8 @@
     "monitor": "node monitoring-api.js",
     "docker": "docker-compose up -d",
     "docker:logs": "docker-compose logs -f",
-    "docker:stop": "docker-compose down"
+    "docker:stop": "docker-compose down",
+    "build": "react-scripts build"
   },
   "dependencies": {
     "@solana/spl-token": "^0.3.8",
