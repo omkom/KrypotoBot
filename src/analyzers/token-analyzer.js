@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import dotenv from 'dotenv';
-import { createTable, calculateStats, calculateRSI, calculateEMA } from './token-analyzer-utils.js';
+import { createTable, calculateStats, calculateRSI, calculateEMA } from '../monitoring/token-analyzer-utils.js';
 
 // Load environment variables
 dotenv.config();

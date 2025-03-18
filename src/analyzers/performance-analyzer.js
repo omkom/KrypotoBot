@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import { fileURLToPath } from 'url';
-import { createTable, calculateStats, readJsonFile, writeJsonFile } from './token-analyzer-utils.js';
+import { createTable, calculateStats, readJsonFile, writeJsonFile } from '../monitoring/token-analyzer-utils.js';
 
 // Configuration
 const CONFIG = {
