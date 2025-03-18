@@ -4,13 +4,15 @@ FROM node:18-alpine AS builder
 WORKDIR /app
 
 # Copy just the package files first to leverage Docker cache
-COPY dashboard/package*.json ./
+COPY package*.json ./
 
 # Install dependencies with force flag to handle peer dependency issues
 RUN npm install --legacy-peer-deps
 
 # Copy dashboard source code
-COPY dashboard/ ./
+COPY src/api/ ./src/api/
+COPY src/monitoring/ ./src/monitoring/
+COPY src/utils/ ./src/utils/
 
 # Build the React app with legacy peer deps flag
 RUN npm run build
