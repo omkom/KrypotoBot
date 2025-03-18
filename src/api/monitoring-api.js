@@ -32,14 +32,17 @@ app.use(compression());
 app.use(express.json());
 app.use(morgan('dev')); // Log HTTP requests
 
-// Log directory
+// Log directory - Use environment variables to ensure consistency across services
 const LOG_DIR = process.env.LOG_DIR || path.join(process.cwd(), 'logs');
+const TRADE_LOG_PATH = process.env.LOG_FILE_PATH || path.join(LOG_DIR, 'trade_logs.json');
+const PROFIT_REPORT_PATH = process.env.PROFIT_REPORT_PATH || path.join(LOG_DIR, 'profit_report.json');
+const PERFORMANCE_LOG_PATH = process.env.PERFORMANCE_LOG || path.join(LOG_DIR, 'performance_analysis.json');
 
 // Key file paths to watch
 const keyFilePaths = [
-  path.join(LOG_DIR, 'trade_logs.json'),
-  path.join(LOG_DIR, 'profit_report.json'),
-  path.join(LOG_DIR, 'performance_analysis.json')
+  TRADE_LOG_PATH,
+  PROFIT_REPORT_PATH,
+  PERFORMANCE_LOG_PATH
 ];
 
 // Create a model for trade logs
@@ -127,12 +130,11 @@ app.get('/api/profit-report', asyncHandler(async (req, res) => {
       return res.json(JSON.parse(cachedData));
     }
     
-    const reportPath = path.join(LOG_DIR, 'profit_report.json');
-    if (!fs.existsSync(reportPath)) {
+    if (!fs.existsSync(PROFIT_REPORT_PATH)) {
       return res.status(404).json({ error: 'Profit report not found' });
     }
 
-    const data = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    const data = JSON.parse(fs.readFileSync(PROFIT_REPORT_PATH, 'utf8'));
     
     // Store in MongoDB for historical tracking
     if (data.summary) {

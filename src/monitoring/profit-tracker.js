@@ -18,16 +18,14 @@ import dotenv from 'dotenv';
 // Add the imports at the top of the file
 import { createTable } from './token-analyzer-utils.js';
 
-// Resolve file paths correctly using ESM approach
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.join(__dirname, '..', '.env') });
+// Load environment variables
+dotenv.config();
 
 // Comprehensive configuration with sensible defaults and documentation
 const CONFIG = {
-  // File paths
-  LOG_FILE_PATH: process.env.LOG_FILE_PATH || path.join(__dirname, 'logs', 'trade_logs.json'),
-  PROFIT_REPORT_PATH: path.join(__dirname, '..', 'profit_report.json'),
+  // File paths - Get from environment or use defaults that match Docker volume paths
+  LOG_FILE_PATH: process.env.LOG_FILE_PATH || path.join(process.cwd(), 'logs', 'trade_logs.json'),
+  PROFIT_REPORT_PATH: process.env.PROFIT_REPORT_PATH || path.join(process.cwd(), 'logs', 'profit_report.json'),
   
   // Performance settings
   CHECK_INTERVAL: parseInt(process.env.CHECK_INTERVAL || '5000'), // Interval in milliseconds

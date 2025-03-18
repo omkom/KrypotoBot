@@ -11,10 +11,10 @@ import { fileURLToPath } from 'url';
 
 // Configuration for instance management
 const INSTANCE_CONFIG = {
-  BASE_LOG_DIR: path.join(process.cwd(), 'logs', 'instances'),
-  PERFORMANCE_LOG: path.join(process.cwd(), 'logs', 'performance_analysis.json'),
-  MAX_CONCURRENT_INSTANCES: 5,
-  PERFORMANCE_CHECK_INTERVAL: 60 * 60 * 1000, // 1 hour
+  BASE_LOG_DIR: process.env.BASE_LOG_DIR || path.join(process.cwd(), 'logs', 'instances'),
+  PERFORMANCE_LOG: process.env.PERFORMANCE_LOG || path.join(process.cwd(), 'logs', 'performance_analysis.json'),
+  MAX_CONCURRENT_INSTANCES: parseInt(process.env.MAX_CONCURRENT_INSTANCES || '5'),
+  PERFORMANCE_CHECK_INTERVAL: parseInt(process.env.PERFORMANCE_CHECK_INTERVAL || '3600000'),
 };
 
 // Predefined parameter configurations for testing
@@ -181,17 +181,17 @@ function gatherInstanceData() {
     console.log(chalk.blue('Gathering data from all instances...'));
     
     // Check if performance log exists and initialize if needed
-    if (!fs.existsSync(CONFIG.PERFORMANCE_LOG)) {
-      console.log(chalk.yellow(`Performance log not found, creating: ${CONFIG.PERFORMANCE_LOG}`));
+    if (!fs.existsSync(INSTANCE_CONFIG.PERFORMANCE_LOG)) {
+      console.log(chalk.yellow(`Performance log not found, creating: ${INSTANCE_CONFIG.PERFORMANCE_LOG}`));
       
       // Ensure directory exists
-      const logDir = path.dirname(CONFIG.PERFORMANCE_LOG);
+      const logDir = path.dirname(INSTANCE_CONFIG.PERFORMANCE_LOG);
       if (!fs.existsSync(logDir)) {
         fs.mkdirSync(logDir, { recursive: true });
       }
       
       // Create empty performance log
-      fs.writeFileSync(CONFIG.PERFORMANCE_LOG, JSON.stringify({
+      fs.writeFileSync(INSTANCE_CONFIG.PERFORMANCE_LOG, JSON.stringify({
         lastUpdate: new Date().toISOString(),
         allInstances: [],
         analysisHistory: []
@@ -201,7 +201,7 @@ function gatherInstanceData() {
     // Load performance log data
     let performanceData = {};
     try {
-      performanceData = JSON.parse(fs.readFileSync(CONFIG.PERFORMANCE_LOG, 'utf8'));
+      performanceData = JSON.parse(fs.readFileSync(INSTANCE_CONFIG.PERFORMANCE_LOG, 'utf8'));
       if (!performanceData.allInstances) performanceData.allInstances = [];
     } catch (error) {
       console.error(chalk.red(`Error reading performance log: ${error.message}`));
@@ -209,19 +209,19 @@ function gatherInstanceData() {
     }
     
     // Check if instances directory exists
-    if (!fs.existsSync(CONFIG.INSTANCES_DIR)) {
-      console.error(chalk.red(`Instances directory not found: ${CONFIG.INSTANCES_DIR}`));
-      fs.mkdirSync(CONFIG.INSTANCES_DIR, { recursive: true });
+    if (!fs.existsSync(INSTANCE_CONFIG.BASE_LOG_DIR)) {
+      console.error(chalk.red(`Instances directory not found: ${INSTANCE_CONFIG.BASE_LOG_DIR}`));
+      fs.mkdirSync(INSTANCE_CONFIG.BASE_LOG_DIR, { recursive: true });
       return { instances: [], tokens: {}, transactions: [] };
     }
     
     // Get list of instances
     let instanceDirs;
     try {
-      instanceDirs = fs.readdirSync(CONFIG.INSTANCES_DIR)
+      instanceDirs = fs.readdirSync(INSTANCE_CONFIG.BASE_LOG_DIR)
         .filter(dir => {
           try {
-            const fullPath = path.join(CONFIG.INSTANCES_DIR, dir);
+            const fullPath = path.join(INSTANCE_CONFIG.BASE_LOG_DIR, dir);
             return fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory();
           } catch (error) {
             console.error(chalk.red(`Error checking directory ${dir}: ${error.message}`));
@@ -244,7 +244,7 @@ function gatherInstanceData() {
     let processedCount = 0;
     
     for (const dir of instanceDirs) {
-      const instanceDir = path.join(CONFIG.INSTANCES_DIR, dir);
+      const instanceDir = path.join(INSTANCE_CONFIG.BASE_LOG_DIR, dir);
       
       try {
         console.log(chalk.blue(`Processing instance directory: ${dir}`));
@@ -409,7 +409,7 @@ function gatherInstanceData() {
         processedCount++;
       } catch (error) {
         console.error(chalk.red(`Error processing instance ${dir}: ${error.message}`));
-        if (CONFIG.DEBUG) {
+        if (process.env.DEBUG === 'true') {
           console.error(chalk.yellow(error.stack));
         }
       }
@@ -443,8 +443,8 @@ function gatherInstanceData() {
     
     // Save updated performance data
     try {
-      fs.writeFileSync(CONFIG.PERFORMANCE_LOG, JSON.stringify(performanceData, null, 2));
-      console.log(chalk.green(`Updated performance log at ${CONFIG.PERFORMANCE_LOG}`));
+      fs.writeFileSync(INSTANCE_CONFIG.PERFORMANCE_LOG, JSON.stringify(performanceData, null, 2));
+      console.log(chalk.green(`Updated performance log at ${INSTANCE_CONFIG.PERFORMANCE_LOG}`));
     } catch (error) {
       console.error(chalk.red(`Error writing performance log: ${error.message}`));
     }
@@ -480,14 +480,13 @@ function launchInstance(paramSet) {
       API_LOG_FILE: path.join(instanceLogDir, 'api_calls.log')
     };
     
-    // Find the correct main bot script file
-    // Update this to match your actual bot script filename
-    const botScriptFile = './src/index.js'; // Change this to the actual name of your main bot file
+    // Find the correct main bot script file - FIX: Use index.js in the project root
+    const botScriptFile = './index.js'; // Changed from './src/index.js' to './index.js'
     
     // Check if the file exists before trying to spawn a process
     if (!fs.existsSync(botScriptFile)) {
       console.error(chalk.red(`Error: Bot script file ${botScriptFile} not found!`));
-      console.log(chalk.yellow(`Please update the botScriptFile variable in instance-manager.js to the correct filename.`));
+      console.log(chalk.yellow(`Please make sure the index.js file exists in the project root directory.`));
       return null;
     }
     
@@ -671,7 +670,9 @@ async function main() {
   for (const paramSet of parameterSets) {
     if (activeInstances.length < INSTANCE_CONFIG.MAX_CONCURRENT_INSTANCES) {
       const instance = launchInstance(paramSet);
-      activeInstances.push(instance);
+      if (instance) {
+        activeInstances.push(instance);
+      }
     }
   }
   
@@ -692,3 +693,4 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 }
 
 export { launchInstance, analyzePerformance };
+

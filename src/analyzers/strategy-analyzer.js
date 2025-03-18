@@ -11,10 +11,10 @@ import path from 'path';
 import chalk from 'chalk';
 import { createTable, calculateStats, readJsonFile, writeJsonFile } from '../monitoring/token-analyzer-utils.js';
 
-// Configuration
+// Configuration - Use environment variables to ensure consistent paths
 const CONFIG = {
   STRATEGY_DATA_PATH: process.env.STRATEGY_DATA_PATH || path.join(process.cwd(), 'logs', 'strategy_analysis.json'),
-  TRADE_LOG_PATH: process.env.TRADE_LOG_PATH || path.join(process.cwd(), 'logs', 'trade_logs.json'),
+  TRADE_LOG_PATH: process.env.LOG_FILE_PATH || path.join(process.cwd(), 'logs', 'trade_logs.json'),
   PROFIT_REPORT_PATH: process.env.PROFIT_REPORT_PATH || path.join(process.cwd(), 'logs', 'profit_report.json'),
   OUTPUT_DIR: process.env.STRATEGY_OUTPUT_DIR || path.join(process.cwd(), 'logs', 'analysis', 'strategies'),
   MIN_TRADES_FOR_ANALYSIS: parseInt(process.env.MIN_TRADES_FOR_ANALYSIS || '5'),

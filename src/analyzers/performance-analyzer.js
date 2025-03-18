@@ -12,7 +12,7 @@ import chalk from 'chalk';
 import { fileURLToPath } from 'url';
 import { createTable, calculateStats, readJsonFile, writeJsonFile } from '../monitoring/token-analyzer-utils.js';
 
-// Configuration
+// Configuration - Use environment variables for consistent paths across services
 const CONFIG = {
   PERFORMANCE_LOG: process.env.PERFORMANCE_LOG || path.join(process.cwd(), 'logs', 'performance_analysis.json'),
   INSTANCES_DIR: process.env.INSTANCES_DIR || path.join(process.cwd(), 'logs', 'instances'),
