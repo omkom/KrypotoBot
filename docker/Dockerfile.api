@@ -15,6 +15,7 @@ RUN npm install --no-save express cors helmet compression morgan mongoose redis 
 
 # Copy app source code
 COPY . .
+COPY ./public/favicon.ico ./public/logo.png /usr/share/nginx/html/
 
 # Expose API port
 EXPOSE 3000
