@@ -64,7 +64,7 @@ services:
       - PROFIT_REPORT_PATH=/app/logs/profit_report.json
     env_file:
       - .env
-    command: node profit-tracker.js
+    command: node src/monitoring/profit-tracker.js
     networks:
       - trading-network
     depends_on:
@@ -95,7 +95,7 @@ services:
       - DEBUG_MODE=false
     env_file:
       - .env
-    command: node instance-manager.js
+    command: node src/api/instance-manager.js
     networks:
       - trading-network
     depends_on:
@@ -129,7 +129,7 @@ services:
       - DEBUG=false
     env_file:
       - .env
-    command: node performance-analyzer.js
+    command: node src/analyzers/performance-analyzer.js
     networks:
       - trading-network
     depends_on:
@@ -163,7 +163,7 @@ services:
       - REDIS_URI=redis://default:${REDIS_PASSWORD:-redispassword}@redis:6379
     env_file:
       - .env
-    command: node monitoring-api.js
+    command: node src/api/monitoring-api.js
     networks:
       - trading-network
     depends_on:
