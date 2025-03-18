@@ -177,28 +177,30 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
-
-  # Dashboard web interface
-  dashboard:
+  
+  # Modern React Dashboard - located in ./dashboard directory
+  web-dashboard:
     build:
-      context: .
-      dockerfile: ./docker/Dockerfile.dashboard
-    image: memecoin-dashboard
-    container_name: memecoin-dashboard
+      context: ./dashboard
+      dockerfile: Dockerfile.dashboard
+    image: memecoin-web-dashboard
+    container_name: memecoin-web-dashboard
     restart: unless-stopped
     ports:
-      - "8080:80"
+      - "8080:8080"
     environment:
-      - API_URL=http://monitoring-api:3000
-      - NODE_OPTIONS=--legacy-peer-deps
+      - API_URL=http://monitoring-api:3000/api
+      - DASHBOARD_PORT=8080
       - NODE_ENV=production
+    volumes:
+      - ./dashboard:/app
     networks:
       - trading-network
     depends_on:
       monitoring-api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
