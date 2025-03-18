@@ -11,7 +11,7 @@ services:
         echo 'Volume permissions fixed!'
       "
     volumes:
-      - shared-logs:/logs
+      - ./logs:/logs
     restart: "no"
 
   trading-core:
@@ -27,7 +27,7 @@ services:
       - mongodb
     volumes:
       - ./:/app
-      - shared-logs:/app/logs
+      - ./logs:/app/logs
     environment:
       - NODE_ENV=development
       - INSTANCE_ID=main
@@ -55,7 +55,7 @@ services:
     container_name: memecoin-profit-tracker
     restart: unless-stopped
     volumes:
-      - shared-logs:/app/logs
+      - ./logs:/app/logs
     environment:
       - CHECK_INTERVAL=10000
       - LOG_FILE_PATH=/app/logs/trade_logs.json
@@ -83,7 +83,7 @@ services:
     container_name: memecoin-instance-manager
     restart: unless-stopped
     volumes:
-      - shared-logs:/app/logs
+      - ./logs:/app/logs
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - BASE_LOG_DIR=/app/logs/instances
@@ -117,7 +117,7 @@ services:
     container_name: memecoin-performance-analyzer
     restart: unless-stopped
     volumes:
-      - shared-logs:/app/logs
+      - ./logs:/app/logs
     environment:
       - PERFORMANCE_LOG=/app/logs/performance_analysis.json
       - INSTANCES_DIR=/app/logs/instances
@@ -148,7 +148,7 @@ services:
     container_name: memecoin-monitoring-api
     restart: unless-stopped
     volumes:
-      - shared-logs:/app/logs
+      - ./logs:/app/logs
     ports:
       - "3000:3000"
     environment:
@@ -298,7 +298,7 @@ services:
       start_period: 10s
 
 volumes:
-  shared-logs:
+  logs:
     name: memecoin_shared_logs
   mongodb-data:
     name: memecoin_mongodb_data
