@@ -89,7 +89,7 @@ services:
       - BASE_LOG_DIR=/app/logs/instances
       - PERFORMANCE_LOG=/app/logs/performance_analysis.json
       - MAX_CONCURRENT_INSTANCES=5
-      - DEBUG_MODE=false
+      - DEBUG_MODE=true
     env_file:
       - .env
     command: node src/api/instance-manager.js
