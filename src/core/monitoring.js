@@ -272,34 +272,152 @@ async function monitorPrice(monitorData) {
     
     // Execute sale if conditions met
     if (sellAmount > 0) {
-      logger.trade(`${sellReason} triggered for ${monitorData.tokenName} at ${roi.toFixed(2)}%`);
-      
-      // Execute sale
-      const saleResult = await sellToken(
-        monitorData.tokenAddress,
-        monitorData.tokenName,
-        sellAmount,
-        monitorData.connection,
-        monitorData.wallet
-      );
-      
-      if (saleResult.success) {
-        logger.trade(
-          `Sold ${sellAmount} ${monitorData.tokenName} for ${saleResult.solReceived} SOL ` +
-          `(${sellReason})`
+        logger.trade(`${sellReason} triggered for ${monitorData.tokenName} at ${roi.toFixed(2)}%`);
+        
+        // Execute sale
+        const saleResult = await sellToken(
+          monitorData.tokenAddress,
+          monitorData.tokenName,
+          sellAmount,
+          monitorData.connection,
+          monitorData.wallet
         );
         
-        // Update monitored amount
-        monitorData.amount -= sellAmount;
-        
-        // If all sold, stop monitoring
-        if (monitorData.amount <= 0) {
-          stopMonitoring(monitorData.tokenAddress);
+        if (saleResult.success) {
+          logger.trade(
+            `Sold ${sellAmount} ${monitorData.tokenName} for ${saleResult.solReceived} SOL ` +
+            `(${sellReason})`
+          );
+          
+          // Update monitored amount
+          monitorData.amount -= sellAmount;
+          
+          // If all sold, stop monitoring
+          if (monitorData.amount <= 0) {
+            stopMonitoring(monitorData.tokenAddress);
+          }
+        } else {
+          logger.error(`Failed to sell ${monitorData.tokenName}: ${saleResult.error}`);
         }
-      } else {
-        logger.error(`Failed to sell ${monitorData.tokenName}: ${saleResult.error}`);
+      }
+    } catch (error) {
+      logger.error(`Error in price monitoring for ${monitorData.tokenName}: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Stops monitoring a token position
+   * @param {string} tokenAddress - Token address to stop monitoring
+   * @returns {boolean} Whether monitoring was successfully stopped
+   */
+  export function stopMonitoring(tokenAddress) {
+    const monitorData = activePositions.get(tokenAddress);
+    
+    if (!monitorData) {
+      logger.warn(`No active monitoring found for ${tokenAddress}`);
+      return false;
+    }
+    
+    // Clear the monitoring interval
+    if (monitorData.intervalId) {
+      clearInterval(monitorData.intervalId);
+    }
+    
+    // Mark as inactive
+    monitorData.active = false;
+    
+    // Remove from active positions
+    activePositions.delete(tokenAddress);
+    
+    logger.debug(`Monitoring stopped for ${monitorData.tokenName} (${tokenAddress})`);
+    return true;
+  }
+  
+  /**
+   * Gets data for all currently monitored positions
+   * @returns {Array} Array of monitored position data
+   */
+  export function getActivePositions() {
+    return Array.from(activePositions.values()).map(position => ({
+      tokenAddress: position.tokenAddress,
+      tokenName: position.tokenName,
+      amount: position.amount,
+      purchaseTime: position.purchaseTime,
+      purchasePrice: position.purchasePrice,
+      currentPrice: position.currentPrice,
+      lastUpdate: position.lastPriceCheck,
+      roi: position.purchasePrice > 0 
+        ? ((position.currentPrice - position.purchasePrice) / position.purchasePrice) * 100 
+        : 0,
+      highestPrice: position.highestPrice,
+      active: position.active,
+      trailingStopActive: position.trailingStopActive,
+      completedStages: Array.from(position.completedStages)
+    }));
+  }
+  
+  /**
+   * Gets monitoring data for a specific token
+   * @param {string} tokenAddress - Token address
+   * @returns {Object|null} Monitoring data or null if not found
+   */
+  export function getPositionData(tokenAddress) {
+    return activePositions.get(tokenAddress) || null;
+  }
+  
+  /**
+   * Manually updates trailing stop parameters for a monitored token
+   * @param {string} tokenAddress - Token address
+   * @param {Object} params - New trailing stop parameters
+   * @returns {boolean} Whether update was successful
+   */
+  export function updateTrailingStop(tokenAddress, params) {
+    const monitorData = activePositions.get(tokenAddress);
+    
+    if (!monitorData) {
+      logger.warn(`No active monitoring found for ${tokenAddress}`);
+      return false;
+    }
+    
+    // Update parameters
+    if (params.active !== undefined) {
+      monitorData.trailingStopActive = !!params.active;
+    }
+    
+    if (params.activationPct !== undefined && params.activationPct > 0) {
+      monitorData.tradeParams.trailingStopActivationPct = params.activationPct;
+    }
+    
+    if (params.distancePct !== undefined && params.distancePct > 0) {
+      monitorData.tradeParams.trailingStopDistancePct = params.distancePct;
+      
+      // Update trailing stop price if active
+      if (monitorData.trailingStopActive && monitorData.highestPrice > 0) {
+        monitorData.trailingStopPrice = monitorData.highestPrice * 
+          (1 - monitorData.tradeParams.trailingStopDistancePct / 100);
       }
     }
-  } catch (error) {
-    logger.error(`Error in price monitoring for ${monitorData.tokenName}: ${error.message}`);
+    
+    // If manually activating trailing stop
+    if (params.active === true && !monitorData.trailingStopActive) {
+      monitorData.trailingStopActive = true;
+      monitorData.trailingStopPrice = monitorData.currentPrice * 
+        (1 - monitorData.tradeParams.trailingStopDistancePct / 100);
+      
+      logger.debug(
+        `Trailing stop manually activated for ${monitorData.tokenName} at ${monitorData.currentPrice.toFixed(8)} SOL, ` +
+        `Stop price: ${monitorData.trailingStopPrice.toFixed(8)} SOL`
+      );
+    }
+    
+    logger.debug(`Trailing stop updated for ${monitorData.tokenName}`);
+    return true;
   }
+  
+  export default {
+    startPositionMonitor,
+    stopMonitoring,
+    getActivePositions,
+    getPositionData,
+    updateTrailingStop
+  };

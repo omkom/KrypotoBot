@@ -1,14 +1,16 @@
 console.log('core/execution.js', '# Trade execution logic');
 
 // src/core/execution.js
-import { PublicKey } from '@solana/web3.js';
+import { PublicKey, Transaction } from '@solana/web3.js';
 import { NATIVE_MINT } from '@solana/spl-token';
 import logger from '../services/logger.js';
 import config from '../config/index.js';
+import errorHandler, { ErrorSeverity } from '../services/errorHandler.js';
 import * as jupiterApi from '../api/jupiter.js';
+import { getPairInfo } from '../api/dexscreener.js';
 
 /**
- * Executes token purchase with optimized parameters
+ * Executes token purchase with enhanced error handling and retry logic
  * @param {string} tokenAddress - Token address
  * @param {string} tokenName - Token name/symbol
  * @param {number} amountInSol - Amount to spend in SOL
@@ -20,6 +22,17 @@ import * as jupiterApi from '../api/jupiter.js';
 export async function buyToken(tokenAddress, tokenName, amountInSol, connection, wallet, options = {}) {
   const isDryRun = options.isDryRun || config.get('DRY_RUN');
   logger.debug(`${isDryRun ? '[DRY RUN] ' : ''}Buying ${tokenName} (${tokenAddress}), Amount: ${amountInSol} SOL`);
+  
+  // Reject if circuit breaker is active for blockchain
+  if (errorHandler.isCircuitBroken('blockchain')) {
+    return {
+      success: false,
+      error: 'Blockchain circuit breaker active - try again later',
+      tokenAddress,
+      tokenName,
+      amountInSol
+    };
+  }
   
   try {
     // Create token mint address
@@ -40,46 +53,105 @@ export async function buyToken(tokenAddress, tokenName, amountInSol, connection,
       throw new Error(`Invalid swap amount: ${amountInSol} SOL`);
     }
     
-    // Execute swap through Jupiter API
-    const result = await jupiterApi.executeSwap({
-      inputMint: NATIVE_MINT, // SOL
-      outputMint: tokenMintAddress,
-      amount: amountInLamports,
-      slippage: options.slippage || config.get('SLIPPAGE')
-    }, connection, wallet);
+    // Execute swap with retry logic for transient failures
+    const maxRetries = options.maxRetries || config.get('MAX_RETRIES');
+    let lastError = null;
     
-    if (!result.success) {
-      if (result.scamDetected) {
-        logger.warn(`Scam token detected for ${tokenName}`);
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+      try {
+        // Execute swap through Jupiter API
+        const result = await jupiterApi.executeSwap({
+          inputMint: NATIVE_MINT, // SOL
+          outputMint: tokenMintAddress,
+          amount: amountInLamports,
+          slippage: options.slippage || config.get('SLIPPAGE')
+        }, connection, wallet);
+        
+        if (!result.success) {
+          if (result.scamDetected) {
+            logger.warn(`Scam token detected for ${tokenName}`);
+            // Reset error counter since this is an expected failure
+            errorHandler.resetErrorCount('blockchain');
+            
+            return {
+              success: false,
+              scamDetected: true,
+              tokenAddress,
+              tokenName,
+              amountInSol
+            };
+          }
+          throw new Error(`Swap failed: ${result.error || 'Unknown error'}`);
+        }
+        
+        // Reset error counter on success
+        errorHandler.resetErrorCount('blockchain');
+        
+        // Calculate tokens received
+        const outputAmount = typeof result.outputAmount === 'bigint' ? 
+          Number(result.outputAmount) : Number(result.outputAmount || 0);
+        
+        logger.trade(`Purchase successful! Received ${outputAmount} ${tokenName}`);
+        
         return {
-          success: false,
-          scamDetected: true,
+          success: true,
+          signature: result.signature,
+          tokensReceived: outputAmount,
+          amountInSol,
           tokenAddress,
           tokenName,
-          amountInSol
+          isDryRun: false,
+          timestamp: new Date().toISOString()
         };
+      } catch (error) {
+        lastError = error;
+        
+        // Only retry for specific transient errors
+        const isRetryable = error.message.includes('timeout') || 
+                           error.message.includes('rate limit') ||
+                           error.message.includes('network error') ||
+                           error.message.includes('connection closed');
+                           
+        if (isRetryable && attempt <= maxRetries) {
+          // Calculate backoff with exponential delay and jitter
+          const delay = Math.min(
+            1000 * Math.pow(2, attempt - 1) * (0.8 + Math.random() * 0.4),
+            15000 // Cap at 15 seconds
+          );
+          
+          logger.warn(`Retrying purchase (${attempt}/${maxRetries}) after ${Math.round(delay)}ms: ${error.message}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          // Not retryable or out of retries
+          break;
+        }
       }
-      throw new Error(`Swap failed: ${result.error || 'Unknown error'}`);
     }
     
-    // Calculate tokens received
-    const outputAmount = typeof result.outputAmount === 'bigint' ? 
-      Number(result.outputAmount) : Number(result.outputAmount || 0);
-    
-    logger.trade(`Purchase successful! Received ${outputAmount} ${tokenName}`);
+    // If we get here, all retries failed
+    const errResult = errorHandler.handleError(
+      lastError, 
+      'blockchain',
+      ErrorSeverity.HIGH,
+      { tokenAddress, tokenName, amountInSol }
+    );
     
     return {
-      success: true,
-      signature: result.signature,
-      tokensReceived: outputAmount,
-      amountInSol,
+      success: false,
+      error: lastError.message,
       tokenAddress,
       tokenName,
-      isDryRun: false,
-      timestamp: new Date().toISOString()
+      amountInSol,
+      recovery: errResult.recoverySteps
     };
   } catch (error) {
-    logger.error(`Error buying ${tokenName}: ${error.message}`);
+    errorHandler.handleError(
+      error, 
+      'trading',
+      ErrorSeverity.MEDIUM,
+      { tokenAddress, tokenName, amountInSol }
+    );
+    
     return {
       success: false,
       error: error.message,
@@ -91,7 +163,7 @@ export async function buyToken(tokenAddress, tokenName, amountInSol, connection,
 }
 
 /**
- * Simulates token purchase for dry run mode
+ * Simulates token purchase for dry run mode with realistic price estimations
  * @param {string} tokenAddress - Token address
  * @param {string} tokenName - Token name/symbol
  * @param {number} amountInSol - Amount in SOL
@@ -102,55 +174,82 @@ async function simulatePurchase(tokenAddress, tokenName, amountInSol, connection
   // Generate unique signature for tracking
   const mockSignature = `DRY_RUN_BUY_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
   
-  // Try to get real price data for better simulation
-  let estimatedTokens = 0;
-  let pricePerToken = 0;
-  
   try {
-    // Import dynamically to avoid circular dependencies
-    const { getPairInfo } = await import('../api/dexscreener.js');
+    // Try to get real price data for better simulation
+    let estimatedTokens = 0;
+    let pricePerToken = 0;
     
+    // Use real market data when available
     const pairInfo = await getPairInfo('solana', tokenAddress);
     if (pairInfo && pairInfo.priceNative) {
       pricePerToken = parseFloat(pairInfo.priceNative);
       if (pricePerToken > 0) {
-        estimatedTokens = amountInSol / pricePerToken;
-        logger.debug(`[DRY RUN] Estimation based on market: ${estimatedTokens.toFixed(4)} tokens @ ${pricePerToken} SOL/token`);
+        // Apply realistic slippage based on liquidity
+        const liquidity = pairInfo.liquidity?.usd || 0;
+        let slippageMultiplier = 1.0;
+        
+        // More slippage for lower liquidity
+        if (liquidity < 5000) {
+          slippageMultiplier = 0.85; // 15% slippage
+        } else if (liquidity < 20000) {
+          slippageMultiplier = 0.9; // 10% slippage
+        } else if (liquidity < 50000) {
+          slippageMultiplier = 0.95; // 5% slippage
+        } else {
+          slippageMultiplier = 0.98; // 2% slippage
+        }
+        
+        // Apply slippage to effective price
+        const effectivePrice = pricePerToken / slippageMultiplier;
+        estimatedTokens = amountInSol / effectivePrice;
+        
+        logger.debug(`[DRY RUN] Market-based estimation: ${estimatedTokens.toFixed(4)} tokens @ ${effectivePrice.toFixed(8)} SOL/token (${(100 - slippageMultiplier * 100).toFixed(1)}% slippage)`);
       }
     }
+    
+    // Fall back to synthetic estimation if no market data
+    if (estimatedTokens === 0 || pricePerToken === 0) {
+      // Generate a realistic memecoin price
+      pricePerToken = 0.0000001 + (Math.random() * 0.000001);
+      estimatedTokens = amountInSol / pricePerToken;
+      logger.debug(`[DRY RUN] Synthetic estimation: ${estimatedTokens.toFixed(4)} tokens @ ${pricePerToken.toFixed(8)} SOL/token`);
+    }
+    
+    // Simulate realistic transaction delays
+    const networkDelay = 500 + Math.random() * 1500;
+    await new Promise(resolve => setTimeout(resolve, networkDelay));
+    
+    logger.trade(`[DRY RUN] Simulated purchase: ${mockSignature}`);
+    logger.trade(`[DRY RUN] Estimated tokens received: ${estimatedTokens.toFixed(2)}`);
+    
+    return {
+      success: true,
+      signature: mockSignature,
+      tokensReceived: estimatedTokens,
+      pricePerToken,
+      amountInSol,
+      tokenAddress,
+      tokenName,
+      isDryRun: true,
+      timestamp: new Date().toISOString()
+    };
   } catch (error) {
-    logger.debug(`[DRY RUN] Error getting price data: ${error.message}`);
+    logger.error(`[DRY RUN] Error simulating purchase: ${error.message}`);
+    
+    // Even in simulation, return a standardized error response
+    return {
+      success: false,
+      error: error.message,
+      isDryRun: true,
+      tokenAddress,
+      tokenName,
+      amountInSol
+    };
   }
-  
-  // If no real data available, use a reasonable estimation
-  if (estimatedTokens === 0 || pricePerToken === 0) {
-    // Estimate based on typical memecoin prices
-    pricePerToken = 0.0000001 + (Math.random() * 0.000001);
-    estimatedTokens = amountInSol / pricePerToken;
-    logger.debug(`[DRY RUN] Arbitrary estimation: ${estimatedTokens.toFixed(4)} tokens @ ${pricePerToken} SOL/token`);
-  }
-  
-  // Simulate network delay
-  await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
-  
-  logger.trade(`[DRY RUN] Simulated purchase: ${mockSignature}`);
-  logger.trade(`[DRY RUN] Estimated tokens received: ${estimatedTokens.toFixed(2)}`);
-  
-  return {
-    success: true,
-    signature: mockSignature,
-    tokensReceived: estimatedTokens,
-    pricePerToken,
-    amountInSol,
-    tokenAddress,
-    tokenName,
-    isDryRun: true,
-    timestamp: new Date().toISOString()
-  };
 }
 
 /**
- * Executes token sale with optimized parameters
+ * Executes token sale with enhanced error handling and market impact simulation
  * @param {string} tokenAddress - Token address
  * @param {string} tokenName - Token name/symbol
  * @param {number} amount - Amount of tokens to sell
@@ -163,46 +262,118 @@ export async function sellToken(tokenAddress, tokenName, amount, connection, wal
   const isDryRun = options.isDryRun || config.get('DRY_RUN');
   logger.debug(`${isDryRun ? '[DRY RUN] ' : ''}Selling ${amount} ${tokenName} (${tokenAddress})`);
   
+  // Reject if circuit breaker is active for blockchain
+  if (errorHandler.isCircuitBroken('blockchain')) {
+    return {
+      success: false,
+      error: 'Blockchain circuit breaker active - try again later',
+      tokenAddress,
+      tokenName,
+      amount
+    };
+  }
+  
   try {
     // For dry run mode, simulate the sale
     if (isDryRun) {
       return simulateSale(tokenAddress, tokenName, amount, connection);
     }
     
+    // Check amount validity
+    if (isNaN(amount) || amount <= 0) {
+      throw new Error(`Invalid token amount: ${amount}`);
+    }
+    
     // Create token mint address
     const tokenMintAddress = new PublicKey(tokenAddress);
     
-    // Execute swap through Jupiter API (token -> SOL)
-    const result = await jupiterApi.executeSwap({
-      inputMint: tokenMintAddress,
-      outputMint: NATIVE_MINT, // SOL
-      amount: BigInt(Math.floor(amount)),
-      slippage: options.slippage || config.get('SLIPPAGE')
-    }, connection, wallet);
+    // Execute swap with retry logic
+    const maxRetries = options.maxRetries || config.get('MAX_RETRIES');
+    let lastError = null;
     
-    if (!result.success) {
-      throw new Error(`Swap failed: ${result.error || 'Unknown error'}`);
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+      try {
+        // Execute swap through Jupiter API (token -> SOL)
+        const result = await jupiterApi.executeSwap({
+          inputMint: tokenMintAddress,
+          outputMint: NATIVE_MINT, // SOL
+          amount: BigInt(Math.floor(amount)),
+          slippage: options.slippage || config.get('SLIPPAGE')
+        }, connection, wallet);
+        
+        if (!result.success) {
+          throw new Error(`Swap failed: ${result.error || 'Unknown error'}`);
+        }
+        
+        // Reset error counter on success
+        errorHandler.resetErrorCount('blockchain');
+        
+        // Calculate SOL received
+        const outputAmount = typeof result.outputAmount === 'bigint' ? 
+          Number(result.outputAmount) / 1_000_000_000 : // Convert from lamports to SOL
+          Number(result.outputAmount || 0) / 1_000_000_000;
+        
+        logger.trade(`Sale successful! Received ${outputAmount.toFixed(6)} SOL`);
+        
+        return {
+          success: true,
+          signature: result.signature,
+          solReceived: outputAmount,
+          amount,
+          tokenAddress,
+          tokenName,
+          isDryRun: false,
+          timestamp: new Date().toISOString()
+        };
+      } catch (error) {
+        lastError = error;
+        
+        // Only retry for specific transient errors
+        const isRetryable = error.message.includes('timeout') || 
+                           error.message.includes('rate limit') ||
+                           error.message.includes('network error') ||
+                           error.message.includes('connection closed');
+                           
+        if (isRetryable && attempt <= maxRetries) {
+          // Calculate backoff with exponential delay and jitter
+          const delay = Math.min(
+            1000 * Math.pow(2, attempt - 1) * (0.8 + Math.random() * 0.4),
+            15000 // Cap at 15 seconds
+          );
+          
+          logger.warn(`Retrying sale (${attempt}/${maxRetries}) after ${Math.round(delay)}ms: ${error.message}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          // Not retryable or out of retries
+          break;
+        }
+      }
     }
     
-    // Calculate SOL received
-    const outputAmount = typeof result.outputAmount === 'bigint' ? 
-      Number(result.outputAmount) / 1_000_000_000 : // Convert from lamports to SOL
-      Number(result.outputAmount || 0) / 1_000_000_000;
-    
-    logger.trade(`Sale successful! Received ${outputAmount.toFixed(6)} SOL`);
+    // If we get here, all retries failed
+    const errResult = errorHandler.handleError(
+      lastError, 
+      'blockchain',
+      ErrorSeverity.HIGH,
+      { tokenAddress, tokenName, amount }
+    );
     
     return {
-      success: true,
-      signature: result.signature,
-      solReceived: outputAmount,
-      amount,
+      success: false,
+      error: lastError.message,
       tokenAddress,
       tokenName,
-      isDryRun: false,
-      timestamp: new Date().toISOString()
+      amount,
+      recovery: errResult.recoverySteps
     };
   } catch (error) {
-    logger.error(`Error selling ${tokenName}: ${error.message}`);
+    errorHandler.handleError(
+      error, 
+      'trading',
+      ErrorSeverity.MEDIUM,
+      { tokenAddress, tokenName, amount }
+    );
+    
     return {
       success: false,
       error: error.message,
@@ -214,7 +385,7 @@ export async function sellToken(tokenAddress, tokenName, amount, connection, wal
 }
 
 /**
- * Simulates token sale for dry run mode with realistic price impact
+ * Simulates token sale with realistic price impact modeling
  * @param {string} tokenAddress - Token address
  * @param {string} tokenName - Token name/symbol
  * @param {number} amount - Amount of tokens to sell
@@ -226,15 +397,13 @@ async function simulateSale(tokenAddress, tokenName, amount, connection) {
   const mockSignature = `DRY_RUN_SELL_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
   
   try {
-    // Import needed modules dynamically
-    const { getPairInfo } = await import('../api/dexscreener.js');
-    
-    // Get current market data
+    // Get current market data for realistic simulation
     const pairInfo = await getPairInfo('solana', tokenAddress);
+    
     let currentPrice = 0;
     let liquidityBase = 0;
     let liquidityQuote = 0;
-    let exactMarketImpact = 0;
+    let marketImpact = 0;
     let solReceived = 0;
     
     if (pairInfo && pairInfo.priceNative) {
@@ -242,44 +411,52 @@ async function simulateSale(tokenAddress, tokenName, amount, connection) {
       liquidityBase = pairInfo.liquidity?.base || 0;
       liquidityQuote = pairInfo.liquidity?.quote || 0;
       
-      // Calculate impact using constant product formula (x*y=k)
+      // Calculate market impact using constant product formula (x*y=k)
       if (liquidityBase > 0 && liquidityQuote > 0) {
-        const k = liquidityBase * liquidityQuote; // product constant
-        const newTokensInPool = liquidityBase + amount; // tokens after sale
-        const newSolInPool = k / newTokensInPool; // new SOL amount in pool
-        solReceived = liquidityQuote - newSolInPool; // SOL you would receive
+        // Use actual pool reserves for calculation
+        const k = liquidityBase * liquidityQuote; // Product constant
+        const newTokensInPool = liquidityBase + amount; // Tokens after adding sale amount
+        const newSolInPool = k / newTokensInPool; // New SOL amount in pool
+        solReceived = liquidityQuote - newSolInPool; // SOL received from sale
         
-        // Calculate price impact percentage
+        // Calculate effective price including impact
         const effectivePrice = solReceived / amount;
-        exactMarketImpact = ((effectivePrice - currentPrice) / currentPrice) * 100;
+        marketImpact = ((effectivePrice - currentPrice) / currentPrice) * 100;
         
-        logger.debug(`[DRY RUN] Market impact: ${exactMarketImpact.toFixed(2)}%, ` +
-                    `Effective price: ${effectivePrice.toFixed(8)} SOL`);
+        logger.debug(`[DRY RUN] Market impact: ${marketImpact.toFixed(2)}%, ` +
+                    `Effective price: ${effectivePrice.toFixed(8)} SOL, ` +
+                    `Base liquidity: ${liquidityBase}, Quote liquidity: ${liquidityQuote}`);
       } else {
-        // Fallback if we can't calculate exact impact
-        const impactPercentage = Math.min(-2, -2 * Math.log10(amount / 100000)); // Logarithmic impact model
-        solReceived = amount * currentPrice * (1 + impactPercentage/100);
-        exactMarketImpact = impactPercentage;
+        // Fallback using logarithmic impact model
+        const liquidityUsd = pairInfo.liquidity?.usd || 0;
+        const saleValueUsd = amount * currentPrice * (pairInfo.priceUsd / pairInfo.priceNative);
+        const impactPct = -2 * Math.log10(1 + saleValueUsd / Math.max(liquidityUsd, 1000));
+        marketImpact = Math.max(-30, Math.min(0, impactPct)); // Cap between -30% and 0%
         
-        logger.debug(`[DRY RUN] Estimated market impact: ${impactPercentage.toFixed(2)}%`);
+        solReceived = amount * currentPrice * (1 + marketImpact/100);
+        logger.debug(`[DRY RUN] Estimated impact: ${marketImpact.toFixed(2)}%, Sale value: $${saleValueUsd.toFixed(2)}, Liquidity: $${liquidityUsd.toFixed(2)}`);
       }
     } else {
-      // No market data available, use reasonable estimate
+      // No market data, use synthetic estimation
       currentPrice = 0.0000001 + (Math.random() * 0.000001);
       solReceived = amount * currentPrice;
-      exactMarketImpact = -5 - (Math.random() * 10); // Random impact between -5% and -15%
       
-      logger.debug(`[DRY RUN] No market data, using estimate: ${currentPrice} SOL/token`);
+      // Generate plausible market impact
+      marketImpact = -5 - (Math.random() * 10); // Random impact between -5% and -15%
+      solReceived = solReceived * (1 + marketImpact/100); // Apply impact to received amount
+      
+      logger.debug(`[DRY RUN] Synthetic estimation: ${currentPrice.toFixed(8)} SOL/token with ${marketImpact.toFixed(2)}% impact`);
     }
     
     // Ensure positive SOL received
     solReceived = Math.max(0, solReceived);
     
     // Simulate network delay
-    await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+    const networkDelay = 500 + Math.random() * 1500;
+    await new Promise(resolve => setTimeout(resolve, networkDelay));
     
     logger.trade(`[DRY RUN] Simulated sale: ${mockSignature}`);
-    logger.trade(`[DRY RUN] Received ${solReceived.toFixed(6)} SOL`);
+    logger.trade(`[DRY RUN] Received ${solReceived.toFixed(6)} SOL with ${marketImpact.toFixed(2)}% market impact`);
     
     return {
       success: true,
@@ -289,12 +466,13 @@ async function simulateSale(tokenAddress, tokenName, amount, connection) {
       tokenAddress,
       tokenName,
       pricePerToken: currentPrice,
-      marketImpact: exactMarketImpact,
+      marketImpact,
       isDryRun: true,
       timestamp: new Date().toISOString()
     };
   } catch (error) {
     logger.error(`[DRY RUN] Error simulating sale: ${error.message}`);
+    
     return {
       success: false,
       error: error.message,
@@ -312,36 +490,41 @@ async function simulateSale(tokenAddress, tokenName, amount, connection) {
  * @returns {Object} Optimized trading parameters
  */
 export function optimizeTradeParameters(analysis) {
-  const { risk, potential, tradeable } = analysis;
+  if (!analysis || !analysis.risk || !analysis.potential || !analysis.tradeable) {
+    logger.warn('Invalid analysis data for parameter optimization');
+    // Return default parameters as fallback
+    return {
+      takeProfitPct: 50,
+      stopLossPct: -20,
+      trailingStopActivationPct: 20,
+      trailingStopDistancePct: 10,
+      entryScalePct: 1.0,
+      maxHoldTimeMinutes: 60,
+      exitStages: [
+        { percent: 25, sellPortion: 0.5 },
+        { percent: 50, sellPortion: 0.5 }
+      ]
+    };
+  }
   
-  // Default parameters
-  const defaults = {
-    takeProfitPct: 50,
-    stopLossPct: -20,
-    trailingStopActivationPct: 20,
-    trailingStopDistancePct: 10,
-    entryScalePct: 1.0, // 100% of calculated position size
-    maxHoldTimeMinutes: 60
-  };
+  // Extract risk and potential scores
+  const riskScore = analysis.risk.riskScore;
+  const potentialScore = analysis.potential.potentialScore;
   
-  // Adjust based on risk profile
-  let takeProfitPct = defaults.takeProfitPct;
-  let stopLossPct = defaults.stopLossPct;
-  let trailingStopActivationPct = defaults.trailingStopActivationPct;
-  let trailingStopDistancePct = defaults.trailingStopDistancePct;
-  let entryScalePct = defaults.entryScalePct;
-  let maxHoldTimeMinutes = defaults.maxHoldTimeMinutes;
+  // Base parameters adjusted by risk level
+  let takeProfitPct, stopLossPct, trailingStopActivationPct, 
+      trailingStopDistancePct, entryScalePct, maxHoldTimeMinutes;
   
-  // Higher risk requires larger profit target and tighter stop loss
-  if (risk.riskScore >= 70) {
-    // High risk token
-    takeProfitPct = 100; // Need higher reward for the risk
-    stopLossPct = -10; // Tighter stop loss
+  // Set parameters based on risk profile
+  if (riskScore >= 70) {
+    // High risk token - tight stops, higher targets, smaller position
+    takeProfitPct = 100;
+    stopLossPct = -10;
     trailingStopActivationPct = 30;
     trailingStopDistancePct = 15;
-    entryScalePct = 0.6; // Reduce position size
+    entryScalePct = 0.6;
     maxHoldTimeMinutes = 30;
-  } else if (risk.riskScore >= 50) {
+  } else if (riskScore >= 50) {
     // Medium-high risk
     takeProfitPct = 75;
     stopLossPct = -15;
@@ -349,8 +532,8 @@ export function optimizeTradeParameters(analysis) {
     trailingStopDistancePct = 12;
     entryScalePct = 0.8;
     maxHoldTimeMinutes = 45;
-  } else if (risk.riskScore >= 30) {
-    // Medium risk
+  } else if (riskScore >= 30) {
+    // Medium risk - balanced approach
     takeProfitPct = 50;
     stopLossPct = -20;
     trailingStopActivationPct = 20;
@@ -358,7 +541,7 @@ export function optimizeTradeParameters(analysis) {
     entryScalePct = 1.0;
     maxHoldTimeMinutes = 60;
   } else {
-    // Low risk
+    // Low risk - wider stops, conservative targets, larger position
     takeProfitPct = 35;
     stopLossPct = -25;
     trailingStopActivationPct = 15;
@@ -368,33 +551,52 @@ export function optimizeTradeParameters(analysis) {
   }
   
   // Adjust based on potential score
-  if (potential.potentialScore >= 80) {
-    // Very high potential - set more ambitious targets
+  if (potentialScore >= 80) {
+    // Very high potential - more ambitious targets
     takeProfitPct += 25;
     maxHoldTimeMinutes += 30;
-  } else if (potential.potentialScore >= 60) {
+  } else if (potentialScore >= 60) {
     // High potential
     takeProfitPct += 15;
     maxHoldTimeMinutes += 15;
   }
   
-  // Calculate optimal exit stages
+  // Create exit stages (improved profit taking strategy)
   const exitStages = [];
   
-  // For higher potential tokens, use staged profit taking
-  if (potential.potentialScore >= 60) {
-    exitStages.push({ percent: takeProfitPct * 0.25, sellPortion: 0.2 }); // Sell 20% at 1/4 of take profit
-    exitStages.push({ percent: takeProfitPct * 0.5, sellPortion: 0.3 }); // Sell 30% at 1/2 of take profit
-    exitStages.push({ percent: takeProfitPct * 0.75, sellPortion: 0.3 }); // Sell 30% at 3/4 of take profit
-    exitStages.push({ percent: takeProfitPct, sellPortion: 0.2 }); // Sell final 20% at full take profit
+  // For higher potential tokens, use more granular staging
+  if (potentialScore >= 70) {
+    // High potential - 4-stage exit for maximum profit capture
+    exitStages.push({ percent: takeProfitPct * 0.25, sellPortion: 0.2 }); // Sell 20% at 1/4 of target
+    exitStages.push({ percent: takeProfitPct * 0.5, sellPortion: 0.3 }); // Sell 30% at 1/2 of target
+    exitStages.push({ percent: takeProfitPct * 0.75, sellPortion: 0.3 }); // Sell 30% at 3/4 of target
+    exitStages.push({ percent: takeProfitPct, sellPortion: 0.2 }); // Sell final 20% at full target
+  } else if (potentialScore >= 50) {
+    // Medium potential - 3-stage exit
+    exitStages.push({ percent: takeProfitPct * 0.33, sellPortion: 0.3 }); // Sell 30% at 1/3 of target
+    exitStages.push({ percent: takeProfitPct * 0.66, sellPortion: 0.3 }); // Sell 30% at 2/3 of target
+    exitStages.push({ percent: takeProfitPct, sellPortion: 0.4 }); // Sell final 40% at full target
   } else {
-    exitStages.push({ percent: takeProfitPct * 0.5, sellPortion: 0.5 }); // Sell 50% at half take profit
-    exitStages.push({ percent: takeProfitPct, sellPortion: 0.5 }); // Sell remaining 50% at full take profit
+    // Low potential - 2-stage exit for quick profit taking
+    exitStages.push({ percent: takeProfitPct * 0.5, sellPortion: 0.5 }); // Sell 50% at half of target
+    exitStages.push({ percent: takeProfitPct, sellPortion: 0.5 }); // Sell remaining 50% at full target
   }
   
-  // Calculate actual position size in SOL based on max allocation and risk
+  // Calculate position size in SOL
   const maxSolPerTrade = config.get('MAX_SOL_PER_TRADE');
-  const positionSizeSol = maxSolPerTrade * tradeable.optimalPositionPct * entryScalePct;
+  const positionSizeSol = maxSolPerTrade * analysis.tradeable.optimalPositionPct * entryScalePct;
+  
+  // Log parameters if in debug mode
+  if (config.get('DEBUG')) {
+    logger.debug(`Optimized parameters for ${analysis.token.name}:`, {
+      risk: riskScore,
+      potential: potentialScore,
+      takeProfitPct,
+      stopLossPct,
+      exitStages: exitStages.length,
+      positionSizeSol
+    });
+  }
   
   return {
     token: analysis.token.name,
@@ -408,10 +610,10 @@ export function optimizeTradeParameters(analysis) {
     maxHoldTimeMinutes,
     exitStages,
     tradeSummary: {
-      riskScore: risk.riskScore,
-      potentialScore: potential.potentialScore,
-      tradeableScore: tradeable.score,
-      assessment: tradeable.assessment
+      riskScore,
+      potentialScore,
+      tradeableScore: analysis.tradeable.score,
+      assessment: analysis.tradeable.assessment
     }
   };
 }
