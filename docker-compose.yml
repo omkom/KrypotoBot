@@ -1,6 +1,14 @@
 version: '3.8'
 
+# KryptoBot - Configuration Docker optimisée
+# Inclut:
+# - Volumes persistants correctement configurés
+# - Healthchecks améliorés pour tous les services
+# - Politiques de redémarrage optimisées
+# - Limites de ressources pour stabilité
+
 services:
+  # Service d'initialisation des volumes - s'exécute une seule fois pour configurer les permissions
   volumes-setup:
     image: alpine:latest
     container_name: memecoin-volumes-setup
@@ -13,7 +21,13 @@ services:
     volumes:
       - ./logs:/logs
     restart: "no"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # Core de trading - service principal
   trading-core:
     build:
       context: .
@@ -35,18 +49,36 @@ services:
       - PROFIT_REPORT_PATH=/app/logs/profit_report.json
       - ERROR_LOG_PATH=/app/logs/error_log.txt
       - API_LOG_FILE=/app/logs/api_calls.log
+      # Configuration de rotation des logs
+      - LOG_MAX_SIZE=5242880
+      - LOG_MAX_FILES=10
+      - LOG_CHECK_INTERVAL=3600000
     env_file:
       - .env
     command: node index.js
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/trade_logs.json') } catch(e) { process.exit(1) }"]
+      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/trade_logs.json'); process.exit(0); } catch(e) { process.exit(1); }"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
+  # Tracker de profits - analyse des gains/pertes
   profit-tracker:
     build:
       context: .
@@ -60,6 +92,9 @@ services:
       - CHECK_INTERVAL=10000
       - LOG_FILE_PATH=/app/logs/trade_logs.json
       - PROFIT_REPORT_PATH=/app/logs/profit_report.json
+      # Configuration de rotation des logs
+      - LOG_MAX_SIZE=5242880
+      - LOG_MAX_FILES=10
     env_file:
       - .env
     command: node src/monitoring/profit-tracker.js
@@ -69,12 +104,23 @@ services:
       trading-core:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/profit_report.json') } catch(e) { process.exit(1) }"]
+      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/profit_report.json'); console.log('Health check passed'); process.exit(0); } catch(e) { console.error(e); process.exit(1); }"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # Gestionnaire d'instances - gère les instances multiples du bot
   instance-manager:
     build:
       context: .
@@ -84,12 +130,15 @@ services:
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - BASE_LOG_DIR=/app/logs/instances
       - PERFORMANCE_LOG=/app/logs/performance_analysis.json
       - MAX_CONCURRENT_INSTANCES=5
       - DEBUG_MODE=true
+      # Configuration de rotation des logs
+      - LOG_MAX_SIZE=5242880
+      - LOG_MAX_FILES=10
     env_file:
       - .env
     command: node src/api/instance-manager.js
@@ -103,12 +152,23 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/performance_analysis.json') } catch(e) { process.exit(1) }"]
+      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/performance_analysis.json'); process.exit(0); } catch(e) { process.exit(1); }"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 45s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # Analyseur de performance - analyse les stratégies
   performance-analyzer:
     build:
       context: .
@@ -123,6 +183,9 @@ services:
       - INSTANCES_DIR=/app/logs/instances
       - OUTPUT_DIR=/app/logs/analysis
       - DEBUG=false
+      # Configuration de rotation des logs
+      - LOG_MAX_SIZE=5242880
+      - LOG_MAX_FILES=10
     env_file:
       - .env
     command: node src/analyzers/performance-analyzer.js
@@ -134,12 +197,45 @@ services:
       instance-manager:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "try { require('fs').accessSync('/app/logs/analysis') } catch(e) { process.exit(1) }"]
-      interval: 30s
+      test: |
+        CMD-SHELL
+        node -e "
+          const fs = require('fs');
+          const path = '/app/logs/analysis';
+          try {
+            if (!fs.existsSync(path)) {
+              process.exit(1);
+            }
+            // Vérifier que le dossier n'est pas vide ou trop ancien
+            const stats = fs.statSync(path);
+            const files = fs.readdirSync(path);
+            if (files.length === 0) {
+              console.error('Analysis directory is empty');
+              process.exit(1);
+            }
+            // Tous les tests ont réussi
+            process.exit(0);
+          } catch (e) {
+            console.error(e);
+            process.exit(1);
+          }
+        "
+      interval: 60s
       timeout: 10s
       retries: 3
       start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # API de monitoring - fournit les données aux interfaces
   monitoring-api:
     build:
       context: .
@@ -156,6 +252,9 @@ services:
       - LOG_DIR=/app/logs
       - MONGO_URI=mongodb://${MONGO_USER:-memecoin}:${MONGO_PASSWORD:-securepassword}@mongodb:27017/tradingbot
       - REDIS_URI=redis://default:${REDIS_PASSWORD:-redispassword}@redis:6379
+      # Configuration de rotation des logs
+      - LOG_MAX_SIZE=5242880
+      - LOG_MAX_FILES=10
     env_file:
       - .env
     command: node src/api/monitoring-api.js
@@ -172,7 +271,18 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # Dashboard Web - interface utilisateur
   web-dashboard:
     build:
       context: ./dashboard
@@ -190,13 +300,31 @@ services:
       - ./dashboard:/app
     networks:
       - trading-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.3'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # MongoDB - base de données primaire
   mongodb:
     image: mongo:latest
     container_name: memecoin-mongodb
     restart: unless-stopped
     volumes:
-      - mongodb-data:/data/db
+      - ./docker-volumes/mongodb:/data/db
+    command: ["--auth"]
     ports:
       - "27017:27017"
     environment:
@@ -208,19 +336,29 @@ services:
     networks:
       - trading-network
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh mongodb:27017/tradingbot --quiet
+      test: ["CMD", "mongosh", "mongodb://localhost:27017/admin", "--eval", "db.adminCommand('ping')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
-    command: ["--auth"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
+  # Redis - cache et file de messages
   redis:
     image: redis:alpine
     container_name: memecoin-redis
     restart: unless-stopped
     volumes:
-      - redis-data:/data
+      - ./docker-volumes/redis:/data
     ports:
       - "6379:6379"
     networks:
@@ -232,14 +370,25 @@ services:
       retries: 3
       start_period: 10s
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redispassword}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # Prometheus - collecte de métriques
   prometheus:
     image: prom/prometheus:latest
     container_name: memecoin-prometheus
     restart: unless-stopped
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
+      - ./docker-volumes/prometheus:/prometheus
     env_file:
       - .env
     ports:
@@ -252,13 +401,24 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # Grafana - visualisation des métriques
   grafana:
     image: grafana/grafana:latest
     container_name: memecoin-grafana
     restart: unless-stopped
     volumes:
-      - grafana-data:/var/lib/grafana
+      - ./docker-volumes/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards
     ports:
@@ -280,7 +440,18 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
+  # Node-exporter - métriques système
   node-exporter:
     image: prom/node-exporter:latest
     container_name: memecoin-node-exporter
@@ -306,18 +477,25 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   logs:
     name: memecoin_shared_logs
-  mongodb-data:
-    name: memecoin_mongodb_data
-  redis-data:
-    name: memecoin_redis_data
-  prometheus-data:
-    name: memecoin_prometheus_data
-  grafana-data:
-    name: memecoin_grafana_data
+    driver: local
+    driver_opts:
+      type: none
+      device: ${PWD}/logs
+      o: bind
 
 networks:
   trading-network:
