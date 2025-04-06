@@ -1,4 +1,4 @@
-src_bck/
+*src_bck/*
 
 # Dependency directories
 node_modules/
