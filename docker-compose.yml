@@ -184,6 +184,8 @@ services:
       - "8080:8080"
     environment:
       - API_URL=http://monitoring-api:3000/api
+    env_file:
+      - .env
     volumes:
       - ./dashboard:/app
     networks:
@@ -201,6 +203,8 @@ services:
       - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:-memecoin}
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:-securepassword}
       - MONGO_INITDB_DATABASE=tradingbot
+    env_file:
+      - .env
     networks:
       - trading-network
     healthcheck:
@@ -236,6 +240,8 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus-data:/prometheus
+    env_file:
+      - .env
     ports:
       - "9090:9090"
     networks:
@@ -261,6 +267,8 @@ services:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
       - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    env_file:
+      - .env
     networks:
       - trading-network
     depends_on:
@@ -288,6 +296,8 @@ services:
       - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
     ports:
       - "9100:9100"
+    env_file:
+      - .env
     networks:
       - trading-network
     healthcheck:

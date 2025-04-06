@@ -1,7 +1,7 @@
 {
-  "id": "default",
+  "id": "main",
   "strategy": "default",
-  "startTime": "2025-04-06T14:36:31.328Z",
+  "startTime": "2025-04-06T14:53:06.878Z",
   "parameters": {
     "SLIPPAGE": "2",
     "MAX_SOL_PER_TRADE": "0.1",
