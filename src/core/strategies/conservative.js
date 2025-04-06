@@ -1,0 +1,1 @@
+console.log('core/strategies/conservative.js', '# Low risk strategy');

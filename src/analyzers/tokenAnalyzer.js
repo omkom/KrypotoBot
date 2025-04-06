@@ -1,0 +1,1 @@
+console.log('analyzers/tokenAnalyzer.js', '# Main token analysis');

@@ -1,0 +1,1 @@
+console.log('core/monitoring.js', '# Position monitoring');

@@ -1,0 +1,1 @@
+console.log('services/errorHandler.js', '# Error handling system');

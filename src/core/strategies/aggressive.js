@@ -1,0 +1,1 @@
+console.log('core/strategies/aggressive.js', '# High risk/reward strategy');

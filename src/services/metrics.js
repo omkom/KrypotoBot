@@ -1,0 +1,1 @@
+console.log('services/metrics.js', '# Performance metrics');

@@ -1,0 +1,1 @@
+console.log('utils/validation.js', '# Data validation');
