@@ -55,7 +55,7 @@ check_prerequisites() {
   fi
   
   # Vérifier Docker Compose
-  if ! command -v docker-compose &> /dev/null; then
+  if ! command -v docker compose &> /dev/null; then
     log "ERROR" "Docker Compose n'est pas installé. Veuillez l'installer avant de continuer."
     exit 1
   fi
@@ -115,7 +115,7 @@ check_containers() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
       log "INFO" "Arrêt des conteneurs en cours..."
-      docker-compose down
+      dcker compose down
       log "SUCCESS" "✓ Conteneurs arrêtés avec succès"
     else
       log "INFO" "Utilisation des conteneurs existants"
@@ -134,11 +134,11 @@ start_application() {
   case $mode in
     "prod"|"production")
       log "INFO" "Mode PRODUCTION - Démarrage en arrière-plan"
-      docker-compose up -d
+      dcker compose up -d
       ;;
     "dev"|"development")
       log "INFO" "Mode DÉVELOPPEMENT - Affichage des logs en direct"
-      docker-compose up
+      dcker compose up
       ;;
     "debug")
       # Créer un fichier .env.debug avec DEBUG=true
@@ -150,7 +150,7 @@ start_application() {
       fi
       
       log "INFO" "Mode DEBUG - Exécution avec DRY_RUN=true et logs détaillés"
-      docker-compose --env-file .env.debug up
+      dcker compose --env-file .env.debug up
       ;;
     *)
       log "ERROR" "Mode inconnu: $mode. Utilisez 'prod', 'dev' ou 'debug'."
@@ -192,21 +192,21 @@ main() {
       ;;
     "stop")
       log "INFO" "Arrêt des conteneurs..."
-      docker-compose down
+      dcker compose down
       log "SUCCESS" "✓ Conteneurs arrêtés avec succès"
       ;;
     "restart")
       log "INFO" "Redémarrage des conteneurs..."
-      docker-compose restart
+      dcker compose restart
       log "SUCCESS" "✓ Conteneurs redémarrés avec succès"
       ;;
     "logs")
       log "INFO" "Affichage des logs..."
-      docker-compose logs -f
+      dcker compose logs -f
       ;;
     "status")
       log "INFO" "État des conteneurs:"
-      docker-compose ps
+      dcker compose ps
       ;;
     "update")
       log "INFO" "Mise à jour de KryptoBot..."
@@ -215,7 +215,7 @@ main() {
       backup_before_update
       
       # Arrêter les conteneurs
-      docker-compose down
+      dcker compose down
       
       # Mettre à jour le code (à adapter selon votre méthode de mise à jour)
       if [ -d ".git" ]; then
@@ -227,11 +227,11 @@ main() {
       
       # Reconstruire les images
       log "INFO" "Reconstruction des images Docker..."
-      docker-compose build
+      dcker compose build
       
       # Redémarrer
       log "INFO" "Redémarrage des conteneurs avec les nouvelles images..."
-      docker-compose up -d
+      dcker compose up -d
       
       log "SUCCESS" "✓ Mise à jour terminée avec succès"
       ;;
@@ -255,7 +255,7 @@ main() {
       log "INFO" "Restauration depuis $backup_file..."
       
       # Arrêter les conteneurs avant la restauration
-      docker-compose down
+      dcker compose down
       
       # Exécuter la restauration
       if [ -f "./docker/backup.sh" ]; then
@@ -267,7 +267,7 @@ main() {
       
       # Redémarrer après la restauration
       log "INFO" "Redémarrage des conteneurs après restauration..."
-      docker-compose up -d
+      dcker compose up -d
       
       log "SUCCESS" "✓ Restauration terminée avec succès"
       ;;
