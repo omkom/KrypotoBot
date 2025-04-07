@@ -18,7 +18,7 @@ import { startBot, stopBot } from './src/core/bot.js';
 import logger from './src/services/logger.js';
 import config from './src/config/index.js';
 import errorHandler, { ErrorSeverity } from './src/services/errorHandler.js';
-import metrics from './src/services/metrics.js';
+//import * as metrics from './src/services/metrics.js';
 
 // Global shutdown flag
 let isShuttingDown = false;

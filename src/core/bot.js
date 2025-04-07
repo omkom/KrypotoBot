@@ -24,7 +24,7 @@ import { analyzeToken } from '../analyzers/tokenAnalyzer.js';
 import { evaluateTokenROI } from '../analyzers/tokenROIAnalyzer.js';
 import { buyToken, sellToken, optimizeTradeParameters } from './execution.js';
 import { startPositionMonitor, stopMonitoring, getActivePositions } from './monitoring.js';
-import metrics from '../services/metrics.js';
+import * as metrics from '../services/metrics.js';
 import tokenLogs from '../services/tokenLogs.js';
 
 // Track processed tokens to avoid duplicates

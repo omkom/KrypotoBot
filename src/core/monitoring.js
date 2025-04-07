@@ -22,7 +22,7 @@ import config from '../config/index.js';
 import { getPairInfo } from '../api/dexscreener.js';
 import { sellToken } from './execution.js';
 import tokenLogs from '../services/tokenLogs.js';
-import metrics from '../services/metrics.js';
+import * as metrics from '../services/metrics.js';
 
 // Track active monitoring positions
 const activePositions = new Map();
