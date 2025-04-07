@@ -1,36 +1,53 @@
-// src/core/bot.js
+/**
+ * Core trading bot engine with market scanning, trade execution, and position management
+ * Provides a complete lifecycle for token evaluation, trading and monitoring with
+ * centralized control and error handling
+ * 
+ * @module bot
+ * @requires ../services/logger
+ * @requires ../config/index
+ * @requires ./execution
+ * @requires ./monitoring
+ * @requires ../api/dexscreener
+ * @requires ../analyzers/tokenAnalyzer
+ */
+
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import { NATIVE_MINT } from '@solana/spl-token';
 import bs58 from 'bs58';
+
 import logger from '../services/logger.js';
 import config from '../config/index.js';
 import errorHandler, { ErrorSeverity } from '../services/errorHandler.js';
 import { getLatestTokens, getPairInfo } from '../api/dexscreener.js';
 import { analyzeToken } from '../analyzers/tokenAnalyzer.js';
-import { analyzeAdvancedROI } from '../analyzers/advancedRoiAnalyzer.js';
+import { evaluateTokenROI } from '../analyzers/roiAnalyzer.js';
 import { buyToken, sellToken, optimizeTradeParameters } from './execution.js';
-import ExitStrategyManager from './exitStrategyManager.js';
+import { startPositionMonitor, stopMonitoring, getActivePositions } from './monitoring.js';
 import metrics from '../services/metrics.js';
+import tokenLogs from '../services/tokenLogs.js';
 
-// Track active trading positions
-const activePositions = new Map();
-// Track already processed tokens to avoid duplicates
+// Track processed tokens to avoid duplicates
 const processedTokens = new Set();
-// Circuit breaker for trading system
-let tradingEnabled = true;
-// Shutdown flag
-let isShuttingDown = false;
+
+// Internal state
+let tradingEnabled = true;    // Circuit breaker for trading system
+let isShuttingDown = false;   // Shutdown flag
+let tradingLoop = null;       // Trading loop interval handler
+let walletBalance = 0;        // Current wallet SOL balance
+let connectionInstance = null; // Solana connection instance
+let walletInstance = null;    // Keypair instance
 
 /**
- * Initialize Solana connection and wallet
+ * Initializes Solana connection and wallet with fallback mechanisms
  * @returns {Promise<Object>} Connection and wallet objects
  */
-export async function initializeWallet() {
+async function initializeWallet() {
   logger.info('Initializing wallet and connection');
   
   try {
     // Get RPC URL based on environment
-    const rpcUrl = config.get('SOLANA_RPC');
+    const rpcUrl = config.get('SOLANA_RPC') || process.env.SOLANA_RPC_URL_PROD || 'https://api.mainnet-beta.solana.com';
     
     // Initialize Solana connection with optimized parameters
     const connection = new Connection(rpcUrl, {
@@ -39,34 +56,39 @@ export async function initializeWallet() {
       confirmTransactionInitialTimeout: 60000
     });
     
-    // Get private key based on environment
-    const privateKey = process.env.ENV === 'local' 
-      ? process.env.SOLANA_PRIVATE_KEY_LOCAL 
-      : process.env.SOLANA_PRIVATE_KEY_PROD;
+    // Determine environment and get appropriate private key
+    let privateKey;
+    if (config.get('ENV') === 'local') {
+      privateKey = process.env.SOLANA_PRIVATE_KEY_LOCAL;
+      
+      if (!privateKey) {
+        logger.warn('Local private key not found. Generating new wallet...');
+        const newWallet = Keypair.generate();
+        privateKey = bs58.encode(newWallet.secretKey);
+        logger.info(`New private key generated: ${privateKey}`);
+        walletInstance = newWallet;
+      }
+    } else {
+      privateKey = process.env.SOLANA_PRIVATE_KEY_PROD;
+    }
     
-    if (!privateKey) {
+    if (!privateKey && !walletInstance) {
       throw new Error('No private key found in environment variables');
     }
     
-    // Create keypair from private key
-    const decodedPrivateKey = bs58.decode(privateKey);
-    const wallet = Keypair.fromSecretKey(decodedPrivateKey);
-    
-    logger.success(`Wallet initialized: ${wallet.publicKey.toString()}`);
-    
-    // Check wallet balance
-    const balance = await connection.getBalance(wallet.publicKey);
-    const solBalance = balance / 1_000_000_000; // Convert lamports to SOL
-    
-    // Log balance and update metrics
-    logger.info(`Wallet balance: ${solBalance.toFixed(4)} SOL`);
-    metrics.updateWalletBalance(solBalance);
-    
-    if (solBalance < 0.05) {
-      logger.warn('Wallet balance is low. Consider adding funds for trading.');
+    // Create keypair from private key if not already created
+    if (!walletInstance) {
+      const decodedPrivateKey = bs58.decode(privateKey);
+      walletInstance = Keypair.fromSecretKey(decodedPrivateKey);
     }
     
-    return { connection, wallet, balance: solBalance };
+    logger.success(`Wallet initialized: ${walletInstance.publicKey.toString()}`);
+    
+    // Test connection and check wallet balance
+    connectionInstance = connection;
+    await updateWalletBalance();
+    
+    return { connection, wallet: walletInstance, balance: walletBalance };
   } catch (error) {
     const handled = errorHandler.handleError(
       error, 
@@ -81,20 +103,44 @@ export async function initializeWallet() {
 }
 
 /**
+ * Updates wallet balance and metrics
+ * @returns {Promise<number>} Current balance in SOL
+ */
+async function updateWalletBalance() {
+  try {
+    if (!connectionInstance || !walletInstance) {
+      throw new Error('Connection or wallet not initialized');
+    }
+    
+    const balance = await connectionInstance.getBalance(walletInstance.publicKey);
+    walletBalance = balance / 1_000_000_000; // Convert lamports to SOL
+    
+    // Log balance and update metrics
+    logger.info(`Wallet balance: ${walletBalance.toFixed(4)} SOL`);
+    metrics.updateWalletBalance(walletBalance);
+    
+    if (walletBalance < 0.05) {
+      logger.warn('Wallet balance is low. Consider adding funds for trading.');
+    }
+    
+    return walletBalance;
+  } catch (error) {
+    logger.error(`Error updating wallet balance: ${error.message}`);
+    return 0;
+  }
+}
+
+/**
  * Calculate optimal trade amount based on wallet balance, risk settings and token potential
- * @param {Connection} connection - Solana connection
- * @param {Keypair} wallet - Wallet keypair
  * @param {number} tradeableScore - Token score (0-100)
  * @returns {Promise<number>} Trade amount in SOL
  */
-export async function calculateTradeAmount(connection, wallet, tradeableScore = 70) {
+async function calculateTradeAmount(tradeableScore = 70) {
   try {
-    // Get wallet balance
-    const balance = await connection.getBalance(wallet.publicKey);
-    const solBalance = balance / 1_000_000_000;
-    
-    // Update metrics
-    metrics.updateWalletBalance(solBalance);
+    // Use cached balance or update if needed
+    if (walletBalance <= 0) {
+      await updateWalletBalance();
+    }
     
     // Calculate base risk percentage
     const baseRiskPercentage = config.get('RISK_PERCENTAGE');
@@ -105,7 +151,7 @@ export async function calculateTradeAmount(connection, wallet, tradeableScore = 
     const adjustedRiskPercentage = baseRiskPercentage * scoreMultiplier;
     
     // Calculate amount but respect maximum per trade
-    const calculatedAmount = solBalance * adjustedRiskPercentage;
+    const calculatedAmount = walletBalance * adjustedRiskPercentage;
     const amount = Math.min(calculatedAmount, maxPerTrade);
     
     // Ensure minimum viable trade size
@@ -113,7 +159,7 @@ export async function calculateTradeAmount(connection, wallet, tradeableScore = 
     const finalAmount = Math.max(amount, minTradeSize);
     
     // Ensure we don't exceed balance (keep 0.002 SOL for fees)
-    const safeAmount = Math.min(finalAmount, solBalance - 0.002);
+    const safeAmount = Math.min(finalAmount, walletBalance - 0.002);
     
     logger.debug(
       `Trade amount calculation: ${safeAmount.toFixed(4)} SOL ` +
@@ -135,260 +181,17 @@ export async function calculateTradeAmount(connection, wallet, tradeableScore = 
 }
 
 /**
- * Creates and stores a new position with optimal exit strategy
- * @param {Object} tokenData - Token information
- * @param {Object} tradeResult - Result of buy transaction
- * @param {Object} connection - Solana connection
- * @param {Object} wallet - Wallet keypair
- * @returns {Object} New position with exit strategy
- */
-function createPosition(tokenData, tradeResult, connection, wallet) {
-  try {
-    // Create position data structure
-    const position = {
-      id: `${tokenData.address}-${Date.now()}`,
-      tokenAddress: tokenData.address,
-      tokenName: tokenData.name,
-      amount: tradeResult.tokensReceived,
-      entryPrice: tradeResult.amountInSol / tradeResult.tokensReceived,
-      entryAmountSol: tradeResult.amountInSol,
-      entryTime: Date.now(),
-      tradeHash: tradeResult.signature,
-      lastUpdated: Date.now(),
-      exitStrategy: null,
-      analysis: tokenData.analysis,
-      status: 'active',
-      // Methods for position management
-      getCurrentPrice: async () => {
-        try {
-          const pairInfo = await getPairInfo('solana', tokenData.address);
-          return pairInfo ? parseFloat(pairInfo.priceNative) : null;
-        } catch (err) {
-          logger.error(`Error getting price for ${tokenData.name}`, err);
-          return null;
-        }
-      },
-      sell: async (amount, reason) => {
-        return await sellPosition(position, amount, reason, connection, wallet);
-      }
-    };
-    
-    // Create exit strategy for this position
-    const baseStrategy = {
-      takeProfitLevels: [25, 50, 100],
-      takeProfitAmounts: [0.3, 0.4, 0.3],
-      stopLoss: -15,
-      trailingStopEnabled: true,
-      trailingStopActivation: 20,
-      trailingStopTrail: 10,
-      maxHoldTime: 60, // Minutes
-      trendMonitoringEnabled: true
-    };
-    
-    // If we have analysis data, optimize the strategy
-    if (tokenData.analysis) {
-      const params = optimizeTradeParameters(tokenData.analysis);
-      baseStrategy.takeProfitLevels = params.takeProfitLevels || baseStrategy.takeProfitLevels;
-      baseStrategy.takeProfitAmounts = params.takeProfitAmounts || baseStrategy.takeProfitAmounts;
-      baseStrategy.stopLoss = params.stopLoss || baseStrategy.stopLoss;
-      baseStrategy.trailingStopActivation = params.trailingStopActivationPct || baseStrategy.trailingStopActivation;
-      baseStrategy.trailingStopTrail = params.trailingStopDistancePct || baseStrategy.trailingStopTrail;
-      baseStrategy.maxHoldTime = params.maxHoldTimeMinutes || baseStrategy.maxHoldTime;
-    }
-    
-    // Create exit strategy manager
-    position.exitStrategy = new ExitStrategyManager(position, baseStrategy);
-    
-    // Track position
-    activePositions.set(position.id, position);
-    
-    // Schedule monitoring
-    startPositionMonitoring(position, connection, wallet);
-    
-    // Log and track metrics
-    logger.trade(`New position created: ${tokenData.name} (${position.amount} tokens)`);
-    metrics.recordNewPosition(position);
-    
-    return position;
-  } catch (error) {
-    logger.error(`Error creating position for ${tokenData.name}`, error);
-    throw error;
-  }
-}
-
-/**
- * Start monitoring a position for exit conditions
- * @param {Object} position - Position to monitor
- * @param {Object} connection - Solana connection
- * @param {Object} wallet - Wallet keypair
- */
-function startPositionMonitoring(position, connection, wallet) {
-  // Skip if already shutting down
-  if (isShuttingDown) return;
-  
-  logger.debug(`Starting monitoring for ${position.tokenName}`);
-  
-  // Set monitoring interval (check every 15 seconds)
-  const intervalId = setInterval(async () => {
-    try {
-      // Skip if position is no longer active
-      if (position.status !== 'active' || !activePositions.has(position.id)) {
-        clearInterval(intervalId);
-        return;
-      }
-      
-      // Get current price
-      const currentPrice = await position.getCurrentPrice();
-      if (!currentPrice) {
-        logger.warn(`Could not get current price for ${position.tokenName}`);
-        return;
-      }
-      
-      // Update exit strategy with current price
-      position.exitStrategy.updatePrice(currentPrice);
-      
-      // Check exit conditions
-      const exitCondition = position.exitStrategy.checkExitConditions();
-      
-      // Log status at intervals (not every check)
-      if (Math.random() < 0.2) { // ~20% of checks
-        const status = position.exitStrategy.getStrategyStatus();
-        logger.debug(
-          `${position.tokenName}: ROI=${status.currentRoi.toFixed(2)}%, ` +
-          `Price=${currentPrice.toFixed(8)}, ` +
-          `TrailingStop=${status.trailingStop.active ? 'Active' : 'Inactive'}`
-        );
-      }
-      
-      // Execute exit if condition triggered
-      if (exitCondition.triggered) {
-        logger.trade(`Exit condition triggered for ${position.tokenName}: ${exitCondition.reason}`);
-        
-        // Execute the sale
-        const saleResult = await position.sell(exitCondition.sellAmount, exitCondition.reason);
-        
-        // Record the exit in strategy
-        position.exitStrategy.recordExit(exitCondition, saleResult);
-        
-        // If position is fully sold, stop monitoring
-        if (position.amount <= 0) {
-          clearInterval(intervalId);
-          position.status = 'closed';
-          activePositions.delete(position.id);
-          logger.trade(`Position closed for ${position.tokenName}`);
-          metrics.recordClosedPosition(position);
-        }
-      }
-    } catch (error) {
-      logger.error(`Error monitoring ${position.tokenName}`, error);
-    }
-  }, 15000); // 15 second interval
-  
-  // Store interval ID for cleanup
-  position.monitoringInterval = intervalId;
-}
-
-/**
- * Executes a sell operation for a position
- * @param {Object} position - Position to sell
- * @param {number} amount - Amount to sell
- * @param {string} reason - Reason for selling
- * @param {Object} connection - Solana connection
- * @param {Object} wallet - Wallet keypair
- * @returns {Promise<Object>} Sell transaction result
- */
-async function sellPosition(position, amount, reason, connection, wallet) {
-  logger.trade(`Selling ${amount} of ${position.tokenName} (${reason})`);
-  
-  try {
-    // Ensure we don't sell more than we have
-    const sellAmount = Math.min(amount, position.amount);
-    
-    // Execute the sale
-    const saleResult = await sellToken(
-      position.tokenAddress,
-      position.tokenName,
-      sellAmount,
-      connection,
-      wallet
-    );
-    
-    if (saleResult.success) {
-      // Update position data
-      position.amount -= sellAmount;
-      position.lastUpdated = Date.now();
-      
-      // Calculate profit metrics
-      const solReceived = saleResult.solReceived;
-      const costBasis = sellAmount * position.entryPrice;
-      const profit = solReceived - costBasis;
-      const roi = ((solReceived / costBasis) - 1) * 100;
-      
-      // Log success
-      logger.trade(
-        `Sold ${sellAmount} ${position.tokenName} for ${solReceived.toFixed(6)} SOL ` +
-        `(${roi.toFixed(2)}% ROI)`
-      );
-      
-      // Update metrics
-      metrics.recordSale({
-        tokenAddress: position.tokenAddress,
-        tokenName: position.tokenName,
-        amount: sellAmount,
-        solReceived,
-        profit,
-        roi,
-        reason
-      });
-      
-      return {
-        success: true,
-        amount: sellAmount,
-        solReceived,
-        profit,
-        roi,
-        reason,
-        signature: saleResult.signature
-      };
-    } else {
-      logger.error(`Failed to sell ${position.tokenName}: ${saleResult.error}`);
-      
-      // Update metrics
-      metrics.recordFailedOperation('sell', {
-        tokenAddress: position.tokenAddress,
-        tokenName: position.tokenName,
-        amount: sellAmount,
-        error: saleResult.error
-      });
-      
-      return {
-        success: false,
-        error: saleResult.error
-      };
-    }
-  } catch (error) {
-    logger.error(`Error in sellPosition for ${position.tokenName}`, error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
-
-/**
  * Enhanced market scanning with robust filtering and token analysis
- * @param {Connection} connection - Solana connection
- * @param {Keypair} wallet - Wallet keypair
  * @returns {Promise<Array>} Tradeable tokens with analysis
  */
-export async function scanMarket(connection, wallet) {
+async function scanMarket() {
   logger.info('Scanning market for trading opportunities...');
   
   try {
     // Get latest tokens from DEXScreener
     const latestTokens = await getLatestTokens('solana', { force: true });
     
-    if (latestTokens.length === 0) {
+    if (!latestTokens || latestTokens.length === 0) {
       logger.warn('No tokens found meeting minimum criteria');
       return [];
     }
@@ -406,14 +209,12 @@ export async function scanMarket(connection, wallet) {
       const token = latestTokens[i];
       
       // Skip if already processed
-      if (processedTokens.has(token.baseToken?.address)) {
+      if (!token.baseToken?.address || processedTokens.has(token.baseToken.address)) {
         continue;
       }
       
       // Add to processed
-      if (token.baseToken?.address) {
-        processedTokens.add(token.baseToken.address);
-      }
+      processedTokens.add(token.baseToken.address);
       
       // Function to analyze a single token
       const analyzeTokenAsync = async () => {
@@ -424,7 +225,7 @@ export async function scanMarket(connection, wallet) {
           
           // Run token through both analyzers
           const tokenAnalysis = analyzeToken(pairInfo);
-          const roiAnalysis = analyzeAdvancedROI(pairInfo);
+          const roiAnalysis = evaluateTokenROI(pairInfo);
           
           // Combine analyses
           const combinedScore = (tokenAnalysis.tradeable.score + roiAnalysis.potentialScore) / 2;
@@ -500,11 +301,9 @@ export async function scanMarket(connection, wallet) {
 /**
  * Execute trades based on market scan results
  * @param {Array} tradeableTokens - Tradeable tokens with analysis
- * @param {Connection} connection - Solana connection
- * @param {Keypair} wallet - Wallet keypair
  * @returns {Promise<Array>} Executed trades
  */
-async function executeTrades(tradeableTokens, connection, wallet) {
+async function executeTrades(tradeableTokens) {
   if (!tradeableTokens || tradeableTokens.length === 0) {
     logger.info('No tradeable tokens found');
     return [];
@@ -518,10 +317,15 @@ async function executeTrades(tradeableTokens, connection, wallet) {
     return [];
   }
   
-  // Get wallet balance for trade sizing
-  const { balance } = await connection.getBalance(wallet.publicKey) / 1_000_000_000;
-  if (balance < 0.01) {
-    logger.warn(`Wallet balance too low for trading: ${balance.toFixed(4)} SOL`);
+  // Ensure we have a connection and wallet
+  if (!connectionInstance || !walletInstance) {
+    logger.error('Connection or wallet not initialized');
+    return [];
+  }
+  
+  // Check wallet balance
+  if (walletBalance < 0.01) {
+    logger.warn(`Wallet balance too low for trading: ${walletBalance.toFixed(4)} SOL`);
     return [];
   }
   
@@ -537,7 +341,7 @@ async function executeTrades(tradeableTokens, connection, wallet) {
       logger.trade(`Trading opportunity: ${token.name} (${token.address}), Score: ${token.score.toFixed(1)}/100`);
       
       // Calculate position size
-      const tradeAmount = await calculateTradeAmount(connection, wallet, token.score);
+      const tradeAmount = await calculateTradeAmount(token.score);
       
       // Skip if trade amount is too small
       if (tradeAmount < 0.005) {
@@ -552,15 +356,15 @@ async function executeTrades(tradeableTokens, connection, wallet) {
         token.address,
         token.name,
         tradeAmount,
-        connection,
-        wallet
+        connectionInstance,
+        walletInstance
       );
       
       if (buyResult.success) {
         logger.success(`Successfully bought ${buyResult.tokensReceived} ${token.name}`);
         
         // Create position with exit strategy
-        const position = createPosition(token, buyResult, connection, wallet);
+        const position = createPosition(token, buyResult);
         
         // Record trade
         executedTrades.push({
@@ -578,6 +382,16 @@ async function executeTrades(tradeableTokens, connection, wallet) {
           amount: buyResult.tokensReceived,
           costInSol: tradeAmount
         });
+        
+        // Log purchase for tracking
+        tokenLogs.logTokenPurchase(
+          token.address,
+          token.name,
+          buyResult.tokensReceived,
+          tradeAmount,
+          buyResult.tokensReceived,
+          { isDryRun: config.get('DRY_RUN') }
+        );
       } else {
         if (buyResult.scamDetected) {
           logger.warn(`Skipping potentially fraudulent token: ${token.name}`);
@@ -609,92 +423,76 @@ async function executeTrades(tradeableTokens, connection, wallet) {
   }
   
   logger.info(`Completed trading execution: ${executedTrades.length} trades executed`);
+  
+  // Update balance after trades
+  await updateWalletBalance();
+  
   return executedTrades;
 }
 
 /**
- * Core trading loop that scans market and executes trades
- * @param {Connection} connection - Solana connection
- * @param {Keypair} wallet - Wallet keypair
+ * Creates and stores a new position with optimal exit strategy
+ * @param {Object} tokenData - Token information
+ * @param {Object} tradeResult - Result of buy transaction
+ * @returns {Object} New position with exit strategy
  */
-async function tradingLoop(connection, wallet) {
+function createPosition(tokenData, tradeResult) {
   try {
-    logger.info('Starting trading cycle...');
+    // Create position from token data and trade result
+    const position = {
+      id: `${tokenData.address}-${Date.now()}`,
+      tokenAddress: tokenData.address,
+      tokenName: tokenData.name,
+      amount: tradeResult.tokensReceived,
+      entryPrice: tradeResult.amountInSol / tradeResult.tokensReceived,
+      entryAmountSol: tradeResult.amountInSol,
+      entryTime: Date.now(),
+      tradeHash: tradeResult.signature
+    };
     
-    // Scan market for opportunities
-    const tradeableTokens = await scanMarket(connection, wallet);
+    // Get trade parameters from token analysis if available
+    let params = {};
     
-    // Execute trades
-    const executedTrades = await executeTrades(tradeableTokens, connection, wallet);
-    
-    // Log results
-    logger.info(`Trading cycle completed: ${executedTrades.length} positions opened`);
-    
-    // Update metrics
-    metrics.updateActiveTrades(activePositions.size);
-    
-    // Schedule next cycle
-    if (!isShuttingDown) {
-      // Random time between 45-75 seconds to avoid predictable patterns
-      const nextDelay = 45000 + Math.floor(Math.random() * 30000);
-      setTimeout(() => tradingLoop(connection, wallet), nextDelay);
+    if (tokenData.analysis) {
+      params = optimizeTradeParameters(tokenData.analysis);
     }
-  } catch (error) {
-    const handled = errorHandler.handleError(
-      error, 
-      'trading', 
-      ErrorSeverity.HIGH, 
-      { component: 'tradingLoop' }
+    
+    // Start position monitoring
+    startPositionMonitor(
+      position.tokenAddress,
+      position.tokenName,
+      position.amount,
+      {
+        takeProfitPct: params.takeProfitPct || config.get('TAKE_PROFIT'),
+        stopLossPct: params.stopLossPct || config.get('STOP_LOSS'),
+        trailingStopActivationPct: params.trailingStopActivationPct || 20,
+        trailingStopDistancePct: params.trailingStopDistancePct || 10,
+        maxHoldTimeMinutes: params.maxHoldTimeMinutes || 60,
+        exitStages: params.exitStages || [
+          { percent: 25, sellPortion: 0.25 },
+          { percent: 50, sellPortion: 0.5 },
+          { percent: 100, sellPortion: 1.0 }
+        ]
+      },
+      connectionInstance,
+      walletInstance
     );
     
-    logger.error('Error in trading loop', error);
+    // Log position creation
+    logger.trade(`New position created: ${tokenData.name} (${position.amount} tokens)`);
     
-    // Trigger circuit breaker if critical error
-    if (error.message.includes('insufficient funds') || 
-        error.message.includes('account not found')) {
-      logger.error('Critical trading error detected - activating circuit breaker');
-      tradingEnabled = false;
-      
-      // Auto-reset after 15 minutes
-      setTimeout(() => {
-        tradingEnabled = true;
-        logger.info('Trading circuit breaker reset - trading resumed');
-      }, 15 * 60 * 1000);
-    }
-    
-    // Schedule next attempt if not shutting down
-    if (!isShuttingDown) {
-      // Longer delay after error (2-3 minutes)
-      const errorDelay = 120000 + Math.floor(Math.random() * 60000);
-      setTimeout(() => tradingLoop(connection, wallet), errorDelay);
-    }
+    return position;
+  } catch (error) {
+    logger.error(`Error creating position for ${tokenData.name}`, error);
+    throw error;
   }
 }
 
 /**
- * Get active positions data
- * @returns {Array} All active positions
- */
-export function getActivePositions() {
-  return Array.from(activePositions.values()).map(position => ({
-    id: position.id,
-    tokenName: position.tokenName,
-    tokenAddress: position.tokenAddress,
-    amount: position.amount,
-    entryPrice: position.entryPrice,
-    entryTime: position.entryTime,
-    currentROI: position.exitStrategy ? position.exitStrategy.getCurrentRoi() : 0,
-    status: position.status
-  }));
-}
-
-/**
- * Sell all active positions (used during shutdown)
- * @param {Connection} connection - Solana connection
- * @param {Keypair} wallet - Wallet keypair
+ * Sells all active positions (used during shutdown)
  * @returns {Promise<Object>} Results of emergency sell operation
  */
-export async function sellAllPositions(connection, wallet) {
+async function sellAllPositions() {
   logger.warn('EMERGENCY SELL: Closing all active positions');
   
   const results = {
@@ -703,7 +501,7 @@ export async function sellAllPositions(connection, wallet) {
   };
   
   // Get all active positions
-  const positions = Array.from(activePositions.values());
+  const positions = getActivePositions();
   
   for (const position of positions) {
     try {
@@ -713,9 +511,13 @@ export async function sellAllPositions(connection, wallet) {
       logger.trade(`Emergency selling ${position.amount} ${position.tokenName}`);
       
       // Execute sale
-      const saleResult = await position.sell(
-        position.amount, 
-        'Emergency Shutdown'
+      const saleResult = await sellToken(
+        position.tokenAddress,
+        position.tokenName,
+        position.amount,
+        connectionInstance,
+        walletInstance,
+        { reason: 'Emergency Shutdown' }
       );
       
       if (saleResult.success) {
@@ -726,14 +528,18 @@ export async function sellAllPositions(connection, wallet) {
           roi: saleResult.roi
         });
         
-        // Mark position as closed
-        position.status = 'closed';
-        activePositions.delete(position.id);
+        // Log the sale
+        tokenLogs.logTokenSale(
+          position.tokenAddress,
+          position.tokenName,
+          position.amount,
+          saleResult.solReceived,
+          { reason: 'Emergency Shutdown' },
+          config.get('DRY_RUN')
+        );
         
-        // Clear monitoring interval
-        if (position.monitoringInterval) {
-          clearInterval(position.monitoringInterval);
-        }
+        // Stop monitoring
+        stopMonitoring(position.tokenAddress);
       } else {
         results.failed.push({
           tokenName: position.tokenName,
@@ -755,7 +561,64 @@ export async function sellAllPositions(connection, wallet) {
   }
   
   logger.info(`Emergency sell completed: ${results.success.length} successful, ${results.failed.length} failed`);
+  
+  // Update balance after sales
+  await updateWalletBalance();
+  
   return results;
+}
+
+/**
+ * Core trading loop that scans market and executes trades
+ */
+async function runTradingCycle() {
+  try {
+    logger.info('Starting trading cycle...');
+    
+    // Scan market for opportunities
+    const tradeableTokens = await scanMarket();
+    
+    // Execute trades
+    const executedTrades = await executeTrades(tradeableTokens);
+    
+    // Log results
+    logger.info(`Trading cycle completed: ${executedTrades.length} positions opened`);
+    
+    // Update metrics
+    metrics.updateActiveTrades(getActivePositions().length);
+    
+    // Schedule next cycle with random delay (45-75 seconds)
+    const nextDelay = 45000 + Math.floor(Math.random() * 30000);
+    tradingLoop = setTimeout(runTradingCycle, nextDelay);
+  } catch (error) {
+    const handled = errorHandler.handleError(
+      error, 
+      'trading', 
+      ErrorSeverity.HIGH, 
+      { component: 'tradingCycle' }
+    );
+    
+    logger.error('Error in trading loop', error);
+    
+    // Trigger circuit breaker if critical error
+    if (error.message.includes('insufficient funds') || 
+        error.message.includes('account not found')) {
+      logger.error('Critical trading error detected - activating circuit breaker');
+      tradingEnabled = false;
+      
+      // Auto-reset after 15 minutes
+      setTimeout(() => {
+        tradingEnabled = true;
+        logger.info('Trading circuit breaker reset - trading resumed');
+      }, 15 * 60 * 1000);
+    }
+    
+    // Schedule next attempt if not shutting down (with longer delay 2-3 minutes)
+    if (!isShuttingDown) {
+      const errorDelay = 120000 + Math.floor(Math.random() * 60000);
+      tradingLoop = setTimeout(runTradingCycle, errorDelay);
+    }
+  }
 }
 
 /**
@@ -780,34 +643,17 @@ export async function startBot() {
     processedTokens.clear();
     
     // Start trading loop
-    await tradingLoop(connection, wallet);
+    runTradingCycle();
     
     logger.success('Bot started successfully');
     
     // Return control interface
     return {
-      stop: async () => {
-        logger.info('Stopping bot...');
-        isShuttingDown = true;
-        
-        // Clean up active positions
-        if (config.get('SELL_ON_SHUTDOWN')) {
-          await sellAllPositions(connection, wallet);
-        }
-        
-        // Clean up monitoring intervals
-        for (const position of activePositions.values()) {
-          if (position.monitoringInterval) {
-            clearInterval(position.monitoringInterval);
-          }
-        }
-        
-        logger.info('Bot stopped successfully');
-      },
+      stop: stopBot,
       getActivePositions,
+      getStats: metrics.getStats,
       connection,
-      wallet,
-      metrics: () => metrics.getStats()
+      wallet
     };
   } catch (error) {
     logger.error('Fatal error starting bot', error);
@@ -815,10 +661,32 @@ export async function startBot() {
   }
 }
 
+/**
+ * Stops the trading bot and performs cleanup
+ * @returns {Promise<boolean>} Success indicator
+ */
+export async function stopBot() {
+  logger.info('Stopping bot...');
+  isShuttingDown = true;
+  
+  // Stop trading cycle
+  if (tradingLoop) {
+    clearTimeout(tradingLoop);
+    tradingLoop = null;
+  }
+  
+  // Clean up active positions
+  if (config.get('SELL_ON_SHUTDOWN')) {
+    await sellAllPositions();
+  }
+  
+  logger.info('Bot stopped successfully');
+  return true;
+}
+
+// Export main functions
 export default {
   startBot,
-  initializeWallet,
-  scanMarket,
-  getActivePositions,
-  sellAllPositions
+  stopBot,
+  getActivePositions
 };
