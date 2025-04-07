@@ -1,48 +1,60 @@
-console.log('analyzers/roiAnalyzer.js', '# Optimized ROI analysis');
+/**
+ * Enhanced ROI Analyzer for Memecoin Trading Bot
+ * Provides advanced token analysis with optimized scoring algorithms
+ * and sophisticated market manipulation detection
+ * 
+ * @module roiAnalyzer
+ * @requires ../services/logger
+ * @requires ../config
+ */
 
-// This module analyzes the potential ROI of tokens based on various metrics
-// src/analyzers/roiAnalyzer.js
 import logger from '../services/logger.js';
 import config from '../config/index.js';
 
 /**
- * Evaluates a token's potential ROI with enhanced precision
- * Uses multi-factor scoring with dynamic weights and momentum analysis
- * @param {Object} token - Token data including liquidity, volume, and price metrics
- * @returns {Object} Detailed analysis with score, evaluation factors, and recommendation
+ * Analyzes token potential ROI using multi-factor weighted scoring with machine learning inspired techniques
+ * Includes advanced manipulation detection to avoid pump & dump schemes
+ * 
+ * @param {Object} token - Token data with liquidity, volume, and transaction metrics
+ * @returns {Object} Comprehensive ROI analysis with manipulation detection
  */
 export function evaluateTokenROI(token) {
-  // Initialize scoring components with empty values
+  // Initialize scoring components with weighted factors
   const scoreComponents = {
-    liquidityScore: 0,    // 0-20 points
-    volumeScore: 0,       // 0-20 points
-    buyPressureScore: 0,  // 0-25 points
-    priceActionScore: 0,  // 0-25 points
-    momentumScore: 0,     // 0-10 points
-    manipulationRisk: 0   // 0-20 points (higher is worse, subtracted from total)
+    liquidityScore: 0,    // 0-20 points - Balanced liquidity assessment
+    volumeScore: 0,       // 0-20 points - Activity level analysis
+    buyPressureScore: 0,  // 0-25 points - Market interest assessment
+    priceActionScore: 0,  // 0-25 points - Multi-timeframe momentum
+    momentumScore: 0,     // 0-10 points - Trend consistency and acceleration
+    manipulationRisk: 0   // Subtracted from total (higher is worse)
   };
   
-  // Extract key metrics with safe fallbacks
+  // Extract key metrics with safe fallbacks to prevent runtime errors
   const liquidityUsd = token.liquidity?.usd || 0;
   const volume24h = token.volume?.h24 || 0;
+  const volumeH1 = token.volume?.h1 || 0;
+  const volumeH6 = token.volume?.h6 || 0;
   const priceChange24h = token.priceChange?.h24 || 0;
   const priceChange1h = token.priceChange?.h1 || 0;
   const priceChange5m = token.priceChange?.m5 || 0;
   const tokenAge = token.pairCreatedAt ? 
     (Date.now() - token.pairCreatedAt) / (1000 * 60 * 60 * 24) : 999;
   
-  // Extract transaction data with safe fallbacks
+  // Extract transaction data with safe fallbacks for buy/sell analysis
   const txns = token.txns || { h1: {}, h24: {}, m5: {} };
   const buys1h = txns.h1?.buys || 0;
   const sells1h = txns.h1?.sells || 0;
   const buys5m = txns.m5?.buys || 0;
   const sells5m = txns.m5?.sells || 0;
   
+  // Initialize manipulation flags array to track suspicious patterns
+  const manipulationFlags = [];
+  
   // =====================================================
   // 1. LIQUIDITY ANALYSIS - Optimal range 10K-100K USD
   // =====================================================
   if (liquidityUsd >= 10000 && liquidityUsd <= 100000) {
-    // Ideal liquidity range - not too small (risky), not too large (limited growth)
+    // Ideal liquidity range - enough depth for trading but still growth potential
     scoreComponents.liquidityScore = 20;
   } else if (liquidityUsd > 5000 && liquidityUsd < 10000) {
     // Good liquidity but slightly lower
@@ -50,9 +62,17 @@ export function evaluateTokenROI(token) {
   } else if (liquidityUsd > 100000 && liquidityUsd <= 250000) {
     // Higher liquidity - established token, less growth potential
     scoreComponents.liquidityScore = 10;
-  } else if (liquidityUsd > 250000 || (liquidityUsd > 1000 && liquidityUsd <= 5000)) {
-    // Very high liquidity or very low but not negligible
+  } else if (liquidityUsd > 250000) {
+    // Very high liquidity - established token with limited price movement potential
     scoreComponents.liquidityScore = 5;
+  } else if (liquidityUsd > 1000 && liquidityUsd <= 5000) {
+    // Lower liquidity - higher risk but still tradeable
+    scoreComponents.liquidityScore = 5;
+  } else if (liquidityUsd <= 1000) {
+    // Extremely low liquidity - very high risk, likely manipulation
+    scoreComponents.liquidityScore = 0;
+    manipulationFlags.push('EXTREMELY_LOW_LIQUIDITY');
+    scoreComponents.manipulationRisk += 15; // Severe penalty for very low liquidity
   }
   
   // =====================================================
@@ -74,11 +94,19 @@ export function evaluateTokenROI(token) {
   } else if (volumeToLiquidityRatio > 5) {
     // Excessive volume compared to liquidity - possibly manipulated
     scoreComponents.volumeScore = 5;
-    // Add manipulation risk factor
+    manipulationFlags.push('EXCESSIVE_VOLUME_RATIO');
     scoreComponents.manipulationRisk += 10;
   } else if (volume24h > 1000) {
     // Low activity relative to liquidity but not dead
     scoreComponents.volumeScore = 5;
+  }
+  
+  // Check for suspicious volume patterns (spikes)
+  const hourlyVolumeRatio = volumeH1 > 0 && volume24h > 0 ? (volumeH1 / volume24h) * 24 : 0;
+  if (hourlyVolumeRatio > 3) {
+    // Volume spike detected - more than 3x the average hourly volume
+    manipulationFlags.push('VOLUME_SPIKE');
+    scoreComponents.manipulationRisk += 5;
   }
   
   // =====================================================
@@ -112,6 +140,7 @@ export function evaluateTokenROI(token) {
   // Check for suspicious buy pattern (possibly wash trading)
   if (buySellRatio5m > 10 || buySellRatio1h > 8) {
     // Extremely one-sided trades are suspicious
+    manipulationFlags.push('SUSPICIOUS_BUY_PATTERN');
     scoreComponents.manipulationRisk += 15;
   }
   
@@ -126,7 +155,10 @@ export function evaluateTokenROI(token) {
     // Strong positive recent momentum
     scoreComponents.priceActionScore += 15;
     // But extreme gains might indicate pump & dump
-    if (priceChange5m > 20) scoreComponents.manipulationRisk += 10;
+    if (priceChange5m > 20) {
+      manipulationFlags.push('EXTREME_SHORT_PUMP');
+      scoreComponents.manipulationRisk += 10;
+    }
   } else if (priceChange5m > 3) {
     // Moderate positive recent momentum
     scoreComponents.priceActionScore += 10;
@@ -140,7 +172,10 @@ export function evaluateTokenROI(token) {
     // Strong hourly uptrend
     scoreComponents.priceActionScore += 10;
     // But extreme gains might indicate pump & dump
-    if (priceChange1h > 40) scoreComponents.manipulationRisk += 5;
+    if (priceChange1h > 40) {
+      manipulationFlags.push('EXTREME_HOURLY_PUMP');
+      scoreComponents.manipulationRisk += 5;
+    }
   } else if (priceChange1h > 5) {
     // Moderate hourly uptrend
     scoreComponents.priceActionScore += 5;
@@ -195,10 +230,7 @@ export function evaluateTokenROI(token) {
   // 7. MANIPULATION DETECTION - Final checks
   // =====================================================
   // Check for suspicious volume spikes compared to history
-  const volumeH1 = token.volume?.h1 || 0;
-  const volumeH6 = token.volume?.h6 || 0;
-  
-  if (volumeH1 > volumeH6 * 2) {
+  if (volumeH1 > volumeH6 * 0.5) {
     // Recent volume spike - possible pump scheme
     scoreComponents.manipulationRisk += 8;
   }
@@ -206,6 +238,7 @@ export function evaluateTokenROI(token) {
   // Check for extreme price movements without corresponding volume
   if (Math.abs(priceChange1h) > 30 && volume24h < liquidityUsd * 0.1) {
     // Large price move with low volume - possibly manipulated
+    manipulationFlags.push('PRICE_VOLUME_MISMATCH');
     scoreComponents.manipulationRisk += 12;
   }
   
@@ -238,6 +271,7 @@ export function evaluateTokenROI(token) {
         buySellRatio1h
       },
       scoreComponents,
+      manipulationFlags,
       finalScore
     });
   }
@@ -269,9 +303,10 @@ export function evaluateTokenROI(token) {
     },
     potentialScore: finalScore,
     scoreComponents,
+    manipulationFlags,
     potentialAssessment,
-    manipulationRisk: scoreComponents.manipulationRisk > 15 ? 'High' : 
-                      scoreComponents.manipulationRisk > 8 ? 'Medium' : 'Low',
+    manipulationRisk: manipulationFlags.length > 2 ? 'High' : 
+                     manipulationFlags.length > 0 ? 'Medium' : 'Low',
     tradingRecommendation: finalScore >= 70 ? 'Strong Buy' :
                           finalScore >= 50 ? 'Buy' :
                           finalScore >= 35 ? 'Watch' : 'Avoid',
