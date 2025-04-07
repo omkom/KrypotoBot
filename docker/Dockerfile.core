@@ -1,34 +1,25 @@
 FROM node:18-alpine
 
-# Install system dependencies
-RUN apk add --no-cache bash curl python3 make g++ gcc git libc6-compat
+# Optimize system dependencies installation
+RUN apk add --no-cache bash curl python3 make g++ gcc libc6-compat && \
+    mkdir -p /app/logs/instances /app/logs/analysis
 
-# Create app directory
 WORKDIR /app
 
-# Copy package files and install dependencies
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --only=production && \
+    npm install --no-save prom-client winston morgan && \
+    npm cache clean --force
 
-# Copy app source code
 COPY . .
 
-# Create log directories with proper permissions
-RUN mkdir -p /app/logs/instances /app/logs/analysis && \
-    chmod -R 777 /app/logs
+# Permissions with better security
+RUN chmod -R 755 /app/logs && \
+    chown -R node:node /app
 
-# Add monitoring utilities
-RUN npm install --no-save prom-client winston morgan
-
-# Add health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl -f http://localhost:9464/metrics || exit 1
-
-# Run as node user but make sure permissions are correct
-RUN chown -R node:node /app
-
-# Set user to node
 USER node
 
-# Set entry command
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD curl -sf http://localhost:9464/metrics || exit 1
+
 CMD ["node", "index.js"]

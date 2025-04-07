@@ -1,28 +1,27 @@
-# Copy the content from the Dockerfile.manager artifact provided earlier
 FROM node:18-alpine
 
-# Install system dependencies including Docker CLI for container management
-RUN apk add --no-cache bash curl docker-cli
+# Combine RUN commands to reduce layers
+RUN apk add --no-cache bash curl docker-cli && \
+    mkdir -p /app/logs/instances /app/logs/analysis
 
-# Create app directory
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Copy only necessary files using .dockerignore
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --only=production && \
+    npm install --no-save dockerode log-timestamp
 
-# Install instance-specific packages
-RUN npm install --no-save dockerode log-timestamp
-
-# Copy app source code
 COPY . .
 
-# Create log directories
-RUN mkdir -p /app/logs/instances /app/logs/analysis
+# Create non-root user
+RUN addgroup -g 1001 nodeapp && \
+    adduser -u 1001 -G nodeapp -s /bin/sh -D nodeapp && \
+    chown -R nodeapp:nodeapp /app
 
-# Add health check
+# Switch to non-root user
+USER nodeapp
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD curl -f http://localhost:9466/health || exit 1
 
-# Set default command
-CMD ["node", "instance-manager.js"]
+CMD ["node", "src/api/instance-manager.js"]

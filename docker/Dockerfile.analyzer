@@ -1,31 +1,22 @@
-# Copy the content from the Dockerfile.analyzer artifact provided earlier
 FROM node:18-alpine
 
-# Install system dependencies
-RUN apk add --no-cache bash curl
+RUN apk add --no-cache bash curl && \
+    mkdir -p /app/logs/instances /app/logs/analysis
 
-# Create app directory
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Multistage build to reduce final image size
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --only=production && \
+    npm install --no-save mathjs d3 papaparse && \
+    npm cache clean --force
 
-# Install analysis-specific packages
-RUN npm install --no-save mathjs d3 papaparse
-
-# Copy app source code
 COPY . .
 
-# Create log directories
-RUN mkdir -p /app/logs/instances /app/logs/analysis
-
-# Add health check
+# Health check using simple command
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl -f http://localhost:9465/health || exit 1
+  CMD curl -sf http://localhost:9465/health || exit 1
 
-# Set user to node
 USER node
 
-# Default command (will be overridden in docker-compose)
-CMD ["node", "profit-tracker.js"]
+CMD ["node", "src/monitoring/profit-tracker.js"]
