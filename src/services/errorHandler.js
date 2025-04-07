@@ -1,105 +1,111 @@
-console.log('services/errorHandler.js', '# Error handling system');
-
 // src/services/errorHandler.js
 import logger from './logger.js';
 import config from '../config/index.js';
 
 /**
- * Error severity levels
+ * Niveaux de sévérité des erreurs
+ * Permet une classification précise pour des réponses adaptées
  * @enum {number}
  */
 export const ErrorSeverity = {
-  CRITICAL: 3,  // System cannot continue, requires immediate attention
-  HIGH: 2,      // Feature broken but system can continue
-  MEDIUM: 1,    // Degraded functionality but still works
-  LOW: 0        // Minor issue that doesn't affect functionality
+  CRITICAL: 3,  // Erreur critique nécessitant une attention immédiate, le système ne peut continuer
+  HIGH: 2,      // Erreur majeure affectant une fonctionnalité, mais le système peut continuer partiellement
+  MEDIUM: 1,    // Erreur modérée avec impact limité sur les fonctionnalités
+  LOW: 0        // Erreur mineure sans impact significatif sur les fonctionnalités
 };
 
 /**
- * Advanced error handling system with severity classification,
- * recovery mechanisms, and error reporting
+ * Système avancé de gestion d'erreurs avec classification,
+ * circuit breakers, et mécanismes de récupération automatique
  */
 class ErrorHandler {
+  /**
+   * Initialise le gestionnaire d'erreurs avec compteurs et seuils configurables
+   */
   constructor() {
-    // Track errors by category for analysis
+    // Suivi des erreurs par catégorie pour analyse
     this.errorStats = {
       api: { count: 0, lastOccurred: null },
       blockchain: { count: 0, lastOccurred: null },
       trading: { count: 0, lastOccurred: null },
+      database: { count: 0, lastOccurred: null },
       system: { count: 0, lastOccurred: null }
     };
     
-    // Track consecutive errors for circuit breaking
+    // Compteurs d'erreurs consécutives pour le circuit breaking
     this.consecutiveErrors = {
       api: 0,
       blockchain: 0,
-      trading: 0
+      trading: 0,
+      database: 0
     };
     
-    // Circuit breaker thresholds
+    // Seuils de déclenchement des circuit breakers
     this.circuitBreakerThresholds = {
-      api: 5,        // Break after 5 consecutive API errors
-      blockchain: 3,  // Break after 3 consecutive blockchain errors
-      trading: 3      // Break after 3 consecutive trading errors
+      api: 5,         // Break après 5 erreurs API consécutives
+      blockchain: 3,   // Break après 3 erreurs blockchain consécutives
+      trading: 3,      // Break après 3 erreurs de trading consécutives
+      database: 3      // Break après 3 erreurs de base de données consécutives
     };
     
-    // Circuit breaker status
+    // État des circuit breakers
     this.circuitStatus = {
       api: { broken: false, until: null },
       blockchain: { broken: false, until: null },
-      trading: { broken: false, until: null }
+      trading: { broken: false, until: null },
+      database: { broken: false, until: null }
     };
   }
   
   /**
-   * Handle an error with appropriate logging and recovery steps
-   * @param {Error} error - The error object
-   * @param {string} category - Error category (api, blockchain, trading, system)
-   * @param {number} severity - Error severity from ErrorSeverity enum
-   * @param {Object} context - Additional context about the error
-   * @returns {Object} Error handling result including recovery steps
+   * Traite une erreur avec journalisation adaptée et mécanismes de récupération
+   * @param {Error} error - L'objet d'erreur
+   * @param {string} category - Catégorie d'erreur (api, blockchain, trading, system, database)
+   * @param {number} severity - Sévérité de l'erreur (ErrorSeverity enum)
+   * @param {Object} context - Contexte supplémentaire sur l'erreur
+   * @returns {Object} Résultat du traitement incluant des étapes de récupération
    */
   handleError(error, category = 'system', severity = ErrorSeverity.MEDIUM, context = {}) {
-    // Update error statistics
+    // Mise à jour des statistiques d'erreur
     if (this.errorStats[category]) {
       this.errorStats[category].count++;
       this.errorStats[category].lastOccurred = new Date();
     }
     
-    // Update consecutive error count
-    if (['api', 'blockchain', 'trading'].includes(category)) {
+    // Mise à jour des compteurs d'erreurs consécutives pour les catégories critiques
+    if (['api', 'blockchain', 'trading', 'database'].includes(category)) {
       this.consecutiveErrors[category]++;
     }
     
-    // Log the error with appropriate level
+    // Journalisation avec niveau approprié
     const errorMessage = `[${category.toUpperCase()}] ${error.message}`;
     switch (severity) {
       case ErrorSeverity.CRITICAL:
-        logger.error(`CRITICAL: ${errorMessage}`, error);
+        logger.error(`CRITIQUE: ${errorMessage}`, error);
         break;
       case ErrorSeverity.HIGH:
-        logger.error(`HIGH: ${errorMessage}`, error);
+        logger.error(`HAUTE: ${errorMessage}`, error);
         break;
       case ErrorSeverity.MEDIUM:
-        logger.warn(`MEDIUM: ${errorMessage}`);
+        logger.warn(`MOYENNE: ${errorMessage}`);
         break;
       case ErrorSeverity.LOW:
-        logger.debug(`LOW: ${errorMessage}`);
+        logger.debug(`BASSE: ${errorMessage}`);
         break;
     }
     
-    // Check if we need to trip circuit breaker
+    // Vérifier si un circuit breaker doit être déclenché
     const circuitBroken = this.checkCircuitBreaker(category);
     
-    // Generate recovery steps based on category and severity
+    // Générer des étapes de récupération selon la catégorie et la sévérité
     const recoverySteps = this.generateRecoverySteps(category, severity, circuitBroken);
     
-    // For critical errors, we might want to trigger alerts
+    // Pour les erreurs critiques, déclencher des alertes
     if (severity === ErrorSeverity.CRITICAL) {
       this.triggerAlert(errorMessage, category, context);
     }
     
-    // Return handling result
+    // Retourner le résultat du traitement
     return {
       handled: true,
       severity,
@@ -115,40 +121,40 @@ class ErrorHandler {
   }
   
   /**
-   * Checks if circuit breaker should be tripped
-   * @param {string} category - Error category
-   * @returns {boolean} Whether circuit was broken
+   * Vérifie si un circuit breaker doit être déclenché
+   * @param {string} category - Catégorie d'erreur
+   * @returns {boolean} Si le circuit breaker a été déclenché
    */
   checkCircuitBreaker(category) {
-    // Skip if category doesn't have circuit breaker
+    // Ignorer si la catégorie n'a pas de circuit breaker
     if (!this.circuitBreakerThresholds[category]) return false;
     
-    // Check if already broken
+    // Vérifier si déjà déclenché
     if (this.circuitStatus[category].broken) {
-      // Check if circuit break time has expired
+      // Vérifier si le délai de refroidissement est expiré
       if (this.circuitStatus[category].until && Date.now() > this.circuitStatus[category].until) {
-        // Reset circuit breaker
+        // Réinitialiser le circuit breaker
         this.circuitStatus[category].broken = false;
         this.circuitStatus[category].until = null;
         this.consecutiveErrors[category] = 0;
-        logger.info(`Circuit breaker for ${category} reset after cooling period`);
+        logger.info(`Circuit breaker pour ${category} réinitialisé après période de refroidissement`);
         return false;
       }
-      return true; // Still broken
+      return true; // Toujours déclenché
     }
     
-    // Check if we need to trip the breaker
+    // Vérifier si nous devons déclencher le breaker
     if (this.consecutiveErrors[category] >= this.circuitBreakerThresholds[category]) {
-      // Trip the breaker with exponential backoff based on frequency
+      // Déclencher avec délai de refroidissement exponentiel basé sur la fréquence
       const backoffMinutes = Math.min(
         5 * Math.pow(2, Math.floor(this.consecutiveErrors[category] / this.circuitBreakerThresholds[category])), 
-        60 // Cap at 60 minutes
+        60 // Plafonner à 60 minutes
       );
       
       this.circuitStatus[category].broken = true;
       this.circuitStatus[category].until = Date.now() + (backoffMinutes * 60 * 1000);
       
-      logger.warn(`Circuit breaker tripped for ${category} for ${backoffMinutes} minutes due to ${this.consecutiveErrors[category]} consecutive errors`);
+      logger.warn(`Circuit breaker déclenché pour ${category} pour ${backoffMinutes} minutes suite à ${this.consecutiveErrors[category]} erreurs consécutives`);
       return true;
     }
     
@@ -156,11 +162,11 @@ class ErrorHandler {
   }
   
   /**
-   * Generates recovery steps based on error category and severity
-   * @param {string} category - Error category
-   * @param {number} severity - Error severity
-   * @param {boolean} circuitBroken - Whether circuit breaker was tripped
-   * @returns {Array<string>} Recovery steps
+   * Génère des étapes de récupération basées sur la catégorie et la sévérité de l'erreur
+   * @param {string} category - Catégorie d'erreur
+   * @param {number} severity - Sévérité de l'erreur
+   * @param {boolean} circuitBroken - Si un circuit breaker a été déclenché
+   * @returns {Array<string>} Étapes de récupération
    */
   generateRecoverySteps(category, severity, circuitBroken) {
     const steps = [];
@@ -168,42 +174,50 @@ class ErrorHandler {
     if (circuitBroken) {
       const cooldownMs = this.circuitStatus[category].until - Date.now();
       const cooldownMinutes = Math.ceil(cooldownMs / 60000);
-      steps.push(`Wait for circuit breaker cooldown: ${cooldownMinutes} minutes`);
+      steps.push(`Attendre la fin du circuit breaker: ${cooldownMinutes} minutes`);
     }
     
     switch (category) {
       case 'api':
-        steps.push('Check API endpoint health and rate limits');
-        steps.push('Verify API credentials and permissions');
+        steps.push('Vérifier la santé et les limites de l\'API');
+        steps.push('Vérifier les identifiants et permissions API');
         if (severity >= ErrorSeverity.HIGH) {
-          steps.push('Switch to fallback API endpoint if available');
+          steps.push('Basculer vers un endpoint API alternatif si disponible');
         }
         break;
         
       case 'blockchain':
-        steps.push('Verify RPC endpoint connectivity');
-        steps.push('Check wallet balance and permissions');
+        steps.push('Vérifier la connectivité RPC');
+        steps.push('Vérifier le solde du wallet et les permissions');
         if (severity >= ErrorSeverity.HIGH) {
-          steps.push('Switch to backup RPC provider');
-          steps.push('Verify transaction confirmation status');
+          steps.push('Basculer vers un fournisseur RPC alternatif');
+          steps.push('Vérifier le statut de confirmation des transactions');
         }
         break;
         
       case 'trading':
-        steps.push('Verify token contract validity');
-        steps.push('Check for sufficient liquidity');
-        steps.push('Adjust slippage parameters');
+        steps.push('Vérifier la validité du contrat token');
+        steps.push('Vérifier la liquidité suffisante');
+        steps.push('Ajuster les paramètres de slippage');
         if (severity >= ErrorSeverity.HIGH) {
-          steps.push('Pause trading temporarily');
-          steps.push('Review trading parameters');
+          steps.push('Suspendre temporairement le trading');
+          steps.push('Réviser les paramètres de trading');
+        }
+        break;
+        
+      case 'database':
+        steps.push('Vérifier la connectivité à la base de données');
+        if (severity >= ErrorSeverity.HIGH) {
+          steps.push('Redémarrer les services de base de données');
+          steps.push('Vérifier l\'espace disque et les ressources système');
         }
         break;
         
       case 'system':
-        steps.push('Check system resources (memory, CPU, disk)');
+        steps.push('Vérifier les ressources système (mémoire, CPU, disque)');
         if (severity >= ErrorSeverity.HIGH) {
-          steps.push('Restart application');
-          steps.push('Check for system updates or configuration issues');
+          steps.push('Redémarrer l\'application');
+          steps.push('Vérifier les mises à jour système ou problèmes de configuration');
         }
         break;
     }
@@ -212,49 +226,49 @@ class ErrorHandler {
   }
   
   /**
-   * Resets the consecutive error counter for a category
-   * @param {string} category - Error category
+   * Réinitialise le compteur d'erreurs consécutives pour une catégorie
+   * @param {string} category - Catégorie d'erreur à réinitialiser
    */
   resetErrorCount(category) {
     if (this.consecutiveErrors[category] !== undefined) {
       this.consecutiveErrors[category] = 0;
       
-      // Also reset circuit breaker if it was tripped
+      // Réinitialiser aussi le circuit breaker s'il était déclenché
       if (this.circuitStatus[category]?.broken) {
         this.circuitStatus[category].broken = false;
         this.circuitStatus[category].until = null;
-        logger.info(`Circuit breaker for ${category} manually reset`);
+        logger.info(`Circuit breaker pour ${category} réinitialisé manuellement`);
       }
     }
   }
   
   /**
-   * Checks if a circuit breaker is active for a category
-   * @param {string} category - Error category to check
-   * @returns {boolean} Whether the circuit is broken
+   * Vérifie si un circuit breaker est actif pour une catégorie
+   * @param {string} category - Catégorie d'erreur à vérifier
+   * @returns {boolean} Si le circuit est rompu
    */
   isCircuitBroken(category) {
     return this.circuitStatus[category]?.broken || false;
   }
   
   /**
-   * Trigger an alert for critical errors
-   * @param {string} message - Error message
-   * @param {string} category - Error category
-   * @param {Object} context - Error context
+   * Déclenche une alerte pour les erreurs critiques
+   * @param {string} message - Message d'erreur
+   * @param {string} category - Catégorie d'erreur
+   * @param {Object} context - Contexte d'erreur
    */
   triggerAlert(message, category, context) {
-    // In a production environment, this would send to an alert system
-    // Here we just log it prominently
-    logger.error(`🚨 ALERT: ${message}`, { category, context });
+    // Dans un environnement de production, envoi vers un système d'alerte
+    // Ici nous nous contentons de logger de manière visible
+    logger.error(`🚨 ALERTE: ${message}`, { category, context });
     
-    // TODO: Implement external alerting via webhook, email, etc.
+    // TODO: Implémenter l'envoi vers un webhook, email, etc. pour les alertes externes
     // if (config.get('ALERT_WEBHOOK')) { ... }
   }
   
   /**
-   * Gets error statistics for monitoring
-   * @returns {Object} Error statistics
+   * Récupère les statistiques d'erreur pour le monitoring
+   * @returns {Object} Statistiques d'erreur
    */
   getErrorStats() {
     return {
@@ -265,5 +279,5 @@ class ErrorHandler {
   }
 }
 
-// Export singleton instance
+// Exporter une instance singleton
 export default new ErrorHandler();

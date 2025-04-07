@@ -35,7 +35,7 @@ export function analyzeToken(tokenData, options = {}) {
   const riskAnalysis = analyzeTokenRisk(tokenData);
   
   // Get ROI potential analysis
-  const potentialAnalysis = evaluateTokenROI(tokenData);
+  const potentialAnalysis = analyzeTokenROI(tokenData);
   
   // Calculate tradeable score (balancing risk and potential)
   // Higher potential and lower risk = better tradeable score
