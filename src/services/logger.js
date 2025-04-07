@@ -1,257 +1,427 @@
-// src/services/logger.js
-import chalk from 'chalk';
+/**
+ * Service de journalisation avancé avec niveaux configurables,
+ * rotation automatique des logs, et sortie console colorée
+ * 
+ * @module logger
+ * @requires fs
+ * @requires path
+ * @requires chalk
+ */
+
 import fs from 'fs';
 import path from 'path';
-import config from '../config/index.js';
-import logRotation from './logRotation.js';
+import chalk from 'chalk';
+
+// Configuration par défaut
+const DEFAULT_CONFIG = {
+  // Niveau minimum pour la console (debug, info, warn, error, critical)
+  consoleLevel: process.env.LOG_CONSOLE_LEVEL || 'info',
+  // Niveau minimum pour les fichiers
+  fileLevel: process.env.LOG_FILE_LEVEL || 'debug',
+  // Activer/désactiver l'écriture dans les fichiers
+  enableFileLogging: process.env.LOG_TO_FILE !== 'false',
+  // Activer/désactiver les couleurs dans la console
+  enableColors: process.env.LOG_COLORS !== 'false',
+  // Répertoire des logs
+  logDir: process.env.LOG_DIR || './logs',
+  // Fichier de log principal
+  logFile: process.env.LOG_FILE || 'app.log',
+  // Fichier pour les erreurs uniquement
+  errorFile: process.env.ERROR_LOG_FILE || 'error.log',
+  // Taille maximum d'un fichier avant rotation (5MB par défaut)
+  maxFileSize: parseInt(process.env.LOG_MAX_FILE_SIZE || 5 * 1024 * 1024),
+  // Nombre maximal de fichiers de log à conserver
+  maxFiles: parseInt(process.env.LOG_MAX_FILES || 10),
+  // Format de date pour les logs
+  dateFormat: process.env.LOG_DATE_FORMAT || 'YYYY-MM-DD HH:mm:ss.SSS'
+};
+
+// Niveaux de log avec leur importance et couleur
+const LOG_LEVELS = {
+  debug: { value: 0, color: 'magenta', prefix: '🔍 DEBUG' },
+  info: { value: 1, color: 'blue', prefix: 'ℹ INFO' },
+  success: { value: 1, color: 'green', prefix: '✓ SUCCESS' },
+  warn: { value: 2, color: 'yellow', prefix: '⚠ WARNING' },
+  error: { value: 3, color: 'red', prefix: '✖ ERROR' },
+  critical: { value: 4, color: 'redBright', prefix: '💀 CRITICAL' },
+  trade: { value: 2, color: 'cyan', prefix: '💱 TRADE' }
+};
 
 /**
- * Service de logging amélioré avec sortie console colorée
- * et journalisation structurée dans des fichiers avec rotation automatique
+ * Gestionnaire de journalisation avec support multi-niveaux et rotation des fichiers
  */
 class Logger {
-  /**
-   * Initialise le logger avec configuration par défaut
-   */
-  constructor() {
-    this.debugMode = config.get('DEBUG');
-    this.logDir = path.dirname(config.get('LOG_FILE_PATH') || './logs/app.log');
-    this.errorLogPath = config.get('ERROR_LOG_PATH') || path.join(this.logDir, 'error.log');
-    this.tradeLogPath = path.join(this.logDir, 'trades.log');
-    this.appLogPath = path.join(this.logDir, 'app.log');
+  constructor(config = {}) {
+    // Fusionner la config par défaut avec celle fournie
+    this.config = { ...DEFAULT_CONFIG, ...config };
     
-    // Créer le répertoire de logs s'il n'existe pas
+    // S'assurer que le répertoire des logs existe
     this.ensureLogDirectory();
     
-    // Configurer les fichiers avec le système de rotation
-    this.setupRotation();
+    // Initialiser les chemins de fichier
+    this.logFilePath = path.join(this.config.logDir, this.config.logFile);
+    this.errorFilePath = path.join(this.config.logDir, this.config.errorFile);
+    
+    // Initialiser les tailles de fichier
+    this.logFileSize = this.getFileSize(this.logFilePath);
+    this.errorFileSize = this.getFileSize(this.errorFilePath);
+    
+    // Synchroniser les fichiers de log existants
+    this.syncLogFiles();
   }
   
   /**
-   * S'assure que le répertoire de logs existe
+   * S'assure que le répertoire des logs existe
    */
   ensureLogDirectory() {
-    if (!fs.existsSync(this.logDir)) {
-      fs.mkdirSync(this.logDir, { recursive: true });
+    if (!fs.existsSync(this.config.logDir)) {
+      try {
+        fs.mkdirSync(this.config.logDir, { recursive: true });
+      } catch (err) {
+        console.error(`Erreur lors de la création du répertoire de logs: ${err.message}`);
+      }
     }
   }
   
   /**
-   * Configure la rotation des fichiers logs
+   * Obtient la taille d'un fichier en octets
+   * @param {string} filePath - Chemin du fichier
+   * @returns {number} Taille du fichier en octets (0 si inexistant)
    */
-  setupRotation() {
-    // Ajouter les fichiers logs au système de rotation
-    if (this.errorLogPath) {
-      logRotation.watchFile(this.errorLogPath);
+  getFileSize(filePath) {
+    try {
+      if (fs.existsSync(filePath)) {
+        const stats = fs.statSync(filePath);
+        return stats.size;
+      }
+    } catch (err) {
+      // Ignorer les erreurs et retourner 0
+    }
+    return 0;
+  }
+  
+  /**
+   * Synchronise les métadonnées des fichiers de log
+   */
+  syncLogFiles() {
+    this.logFileSize = this.getFileSize(this.logFilePath);
+    this.errorFileSize = this.getFileSize(this.errorFilePath);
+  }
+  
+  /**
+   * Effectue une rotation d'un fichier de log s'il dépasse la taille maximale
+   * @param {string} filePath - Chemin du fichier à vérifier
+   * @param {number} currentSize - Taille actuelle du fichier
+   * @returns {number} Nouvelle taille après rotation (0 si rotation effectuée)
+   */
+  rotateLogFileIfNeeded(filePath, currentSize) {
+    if (currentSize >= this.config.maxFileSize) {
+      try {
+        // Générer un timestamp pour le nom du fichier de backup
+        const timestamp = new Date().toISOString()
+          .replace(/:/g, '-')
+          .replace(/\..+/, '');
+        
+        const fileDir = path.dirname(filePath);
+        const fileBase = path.basename(filePath);
+        const rotatedFile = path.join(
+          fileDir,
+          `${fileBase}.${timestamp}`
+        );
+        
+        // Renommer le fichier actuel
+        fs.renameSync(filePath, rotatedFile);
+        
+        // Créer un nouveau fichier vide
+        fs.writeFileSync(filePath, '');
+        
+        // Nettoyer les anciens fichiers si nécessaire
+        this.cleanupOldLogFiles(fileDir, fileBase);
+        
+        return 0;
+      } catch (err) {
+        console.error(`Erreur lors de la rotation du fichier log: ${err.message}`);
+        return currentSize;
+      }
     }
     
-    logRotation.watchFile(this.tradeLogPath);
-    logRotation.watchFile(this.appLogPath);
+    return currentSize;
   }
   
   /**
-   * Génère un timestamp formaté pour les logs
-   * @returns {string} Timestamp ISO
+   * Nettoie les anciens fichiers de log pour respecter maxFiles
+   * @param {string} dir - Répertoire des logs
+   * @param {string} baseFileName - Nom de base du fichier de log
    */
-  getTimestamp() {
-    return new Date().toISOString();
+  cleanupOldLogFiles(dir, baseFileName) {
+    try {
+      // Lire tous les fichiers du répertoire
+      const files = fs.readdirSync(dir);
+      
+      // Filtrer pour ne garder que les fichiers de log rotated
+      const pattern = new RegExp(`^${baseFileName}\\.[\\d-]+T[\\d-]+$`);
+      const logFiles = files
+        .filter(file => pattern.test(file))
+        .map(file => ({
+          name: file,
+          path: path.join(dir, file),
+          time: fs.statSync(path.join(dir, file)).mtime.getTime()
+        }))
+        .sort((a, b) => b.time - a.time); // Plus récent d'abord
+      
+      // Supprimer les fichiers excédentaires
+      if (logFiles.length > this.config.maxFiles) {
+        const filesToDelete = logFiles.slice(this.config.maxFiles);
+        for (const file of filesToDelete) {
+          fs.unlinkSync(file.path);
+        }
+      }
+    } catch (err) {
+      console.error(`Erreur lors du nettoyage des anciens logs: ${err.message}`);
+    }
   }
   
   /**
-   * Journalise un message de type info
+   * Formatte un message de log
+   * @param {string} level - Niveau de log
    * @param {string} message - Message à journaliser
-   * @param {Object} data - Données optionnelles à inclure
+   * @param {any} data - Données supplémentaires
+   * @param {Error} error - Objet d'erreur optionnel
+   * @returns {string} Message formatté
+   */
+  formatLogMessage(level, message, data = null, error = null) {
+    // Formater la date 
+    const timestamp = new Date().toISOString();
+    
+    // Créer l'objet de base
+    const logObject = {
+      timestamp,
+      level,
+      message
+    };
+    
+    // Ajouter les données si présentes
+    if (data !== null) {
+      logObject.data = data;
+    }
+    
+    // Ajouter les informations d'erreur si présentes
+    if (error) {
+      logObject.error = {
+        message: error.message,
+        stack: error.stack
+      };
+    }
+    
+    return JSON.stringify(logObject);
+  }
+  
+  /**
+   * Écrit un message dans le fichier de log
+   * @param {string} level - Niveau de log
+   * @param {string} message - Message à journaliser
+   * @param {any} data - Données supplémentaires
+   * @param {Error} error - Objet d'erreur optionnel
+   * @returns {boolean} Succès de l'écriture
+   */
+  writeToFile(level, message, data = null, error = null) {
+    if (!this.config.enableFileLogging) {
+      return false;
+    }
+    
+    // Vérifier le niveau de log minimum pour les fichiers
+    if (LOG_LEVELS[level].value < LOG_LEVELS[this.config.fileLevel].value) {
+      return false;
+    }
+    
+    try {
+      // Formater le message
+      const logMessage = this.formatLogMessage(level, message, data, error);
+      
+      // Ajouter une nouvelle ligne
+      const logEntry = `${logMessage}\n`;
+      
+      // Écrire dans le fichier principal
+      this.logFileSize = this.rotateLogFileIfNeeded(this.logFilePath, this.logFileSize);
+      fs.appendFileSync(this.logFilePath, logEntry);
+      this.logFileSize += Buffer.byteLength(logEntry);
+      
+      // Si c'est une erreur, écrire aussi dans le fichier d'erreur
+      if (level === 'error' || level === 'critical') {
+        this.errorFileSize = this.rotateLogFileIfNeeded(this.errorFilePath, this.errorFileSize);
+        fs.appendFileSync(this.errorFilePath, logEntry);
+        this.errorFileSize += Buffer.byteLength(logEntry);
+      }
+      
+      return true;
+    } catch (err) {
+      console.error(`Erreur d'écriture dans le fichier log: ${err.message}`);
+      return false;
+    }
+  }
+  
+  /**
+   * Écrit un message dans la console avec la couleur appropriée
+   * @param {string} level - Niveau de log
+   * @param {string} message - Message à journaliser
+   * @param {any} data - Données supplémentaires
+   * @param {Error} error - Objet d'erreur optionnel
+   */
+  writeToConsole(level, message, data = null, error = null) {
+    // Vérifier le niveau de log minimum pour la console
+    if (LOG_LEVELS[level].value < LOG_LEVELS[this.config.consoleLevel].value) {
+      return;
+    }
+    
+    const levelConfig = LOG_LEVELS[level];
+    const prefix = levelConfig.prefix;
+    
+    // Utiliser chalk si les couleurs sont activées
+    const colorizedPrefix = this.config.enableColors 
+      ? chalk[levelConfig.color](prefix)
+      : prefix;
+    
+    // Afficher le message
+    console.log(`${colorizedPrefix}: ${message}`);
+    
+    // Afficher les données si présentes et si c'est un niveau debug
+    if (data !== null && (level === 'debug' || this.config.consoleLevel === 'debug')) {
+      if (typeof data === 'object') {
+        console.log(
+          this.config.enableColors 
+            ? chalk.gray(JSON.stringify(data, null, 2))
+            : JSON.stringify(data, null, 2)
+        );
+      } else {
+        console.log(
+          this.config.enableColors 
+            ? chalk.gray(String(data))
+            : String(data)
+        );
+      }
+    }
+    
+    // Afficher la stack trace pour les erreurs
+    if (error && error.stack) {
+      console.log(
+        this.config.enableColors 
+          ? chalk.red(error.stack)
+          : error.stack
+      );
+    }
+  }
+  
+  /**
+   * Méthode principale de log qui distribue aux différentes sorties
+   * @param {string} level - Niveau de log
+   * @param {string} message - Message à journaliser
+   * @param {any} data - Données supplémentaires
+   * @param {Error} error - Objet d'erreur optionnel
+   */
+  log(level, message, data = null, error = null) {
+    if (!LOG_LEVELS[level]) {
+      level = 'info'; // Niveau par défaut
+    }
+    
+    // Écrire dans la console
+    this.writeToConsole(level, message, data, error);
+    
+    // Écrire dans le fichier
+    this.writeToFile(level, message, data, error);
+  }
+  
+  /**
+   * Log de niveau debug
+   * @param {string} message - Message à journaliser
+   * @param {any} data - Données supplémentaires
+   */
+  debug(message, data = null) {
+    this.log('debug', message, data);
+  }
+  
+  /**
+   * Log de niveau info
+   * @param {string} message - Message à journaliser
+   * @param {any} data - Données supplémentaires
    */
   info(message, data = null) {
-    console.log(chalk.blue(`ℹ INFO: ${message}`));
-    this.writeToFile('INFO', message, data, this.appLogPath);
+    this.log('info', message, data);
   }
   
   /**
-   * Journalise un message de succès
+   * Log de succès
    * @param {string} message - Message à journaliser
-   * @param {Object} data - Données optionnelles à inclure
+   * @param {any} data - Données supplémentaires
    */
   success(message, data = null) {
-    console.log(chalk.green(`✓ SUCCESS: ${message}`));
-    this.writeToFile('SUCCESS', message, data, this.appLogPath);
+    this.log('success', message, data);
   }
   
   /**
-   * Journalise un message d'avertissement
+   * Log d'avertissement
    * @param {string} message - Message à journaliser
-   * @param {Object} data - Données optionnelles à inclure
+   * @param {any} data - Données supplémentaires
    */
   warn(message, data = null) {
-    console.log(chalk.yellow(`⚠ WARNING: ${message}`));
-    this.writeToFile('WARNING', message, data, this.appLogPath);
+    this.log('warn', message, data);
   }
   
   /**
-   * Journalise un message d'erreur
+   * Log d'erreur
    * @param {string} message - Message à journaliser
    * @param {Error} error - Objet d'erreur optionnel
    */
   error(message, error = null) {
-    console.log(chalk.red(`✖ ERROR: ${message}`));
-    if (error && this.debugMode) {
-      console.log(chalk.red(error.stack));
-    }
-    
-    // Écriture dans le fichier de log général
-    this.writeToFile('ERROR', message, null, this.appLogPath, error);
-    
-    // Écriture dans le fichier d'erreurs dédié
-    if (this.errorLogPath) {
-      this.writeToFile('ERROR', message, null, this.errorLogPath, error);
-    }
+    this.log('error', message, null, error);
   }
   
   /**
-   * Journalise un message critique (erreur fatale)
+   * Log d'erreur critique
    * @param {string} message - Message à journaliser
    * @param {Error} error - Objet d'erreur optionnel
    */
   critical(message, error = null) {
-    console.log(chalk.bgRed.white(`💀 CRITICAL: ${message}`));
-    if (error) {
-      console.log(chalk.red(error.stack));
-    }
-    
-    // Écriture dans le fichier de log général et d'erreurs
-    this.writeToFile('CRITICAL', message, null, this.appLogPath, error);
-    this.writeToFile('CRITICAL', message, null, this.errorLogPath, error);
+    this.log('critical', message, null, error);
   }
   
   /**
-   * Journalise un message de debug (uniquement en mode debug)
+   * Log spécifique pour les trades
    * @param {string} message - Message à journaliser
-   * @param {any} data - Données optionnelles à afficher
-   */
-  debug(message, data = null) {
-    if (this.debugMode) {
-      console.log(chalk.magenta(`🔍 DEBUG: ${message}`));
-      if (data !== undefined) {
-        console.log(chalk.gray(typeof data === 'string' ? data : JSON.stringify(data, null, 2)));
-      }
-      this.writeToFile('DEBUG', message, data, this.appLogPath);
-    }
-  }
-  
-  /**
-   * Journalise un message lié au trading
-   * @param {string} message - Message à journaliser
-   * @param {Object} data - Données optionnelles de trading
+   * @param {any} data - Données de trade
    */
   trade(message, data = null) {
-    console.log(chalk.cyan(`💱 TRADE: ${message}`));
-    
-    // Écrire dans le fichier de log général
-    this.writeToFile('TRADE', message, data, this.appLogPath);
-    
-    // Écrire dans le fichier de trades spécifique
-    this.writeToFile('TRADE', message, data, this.tradeLogPath);
+    this.log('trade', message, data);
   }
   
   /**
-   * Journalise un message lié au système
-   * @param {string} message - Message à journaliser
-   * @param {Object} data - Données optionnelles système
-   */
-  system(message, data = null) {
-    console.log(chalk.hex('#FF8800')(`🔧 SYSTEM: ${message}`));
-    this.writeToFile('SYSTEM', message, data, this.appLogPath);
-  }
-  
-  /**
-   * Écrit une entrée de journal dans un fichier
-   * @param {string} level - Niveau de log
-   * @param {string} message - Message à journaliser
-   * @param {any} data - Données additionnelles
-   * @param {string} filePath - Chemin du fichier
-   * @param {Error} error - Objet d'erreur (optionnel)
-   */
-  writeToFile(level, message, data = null, filePath = null, error = null) {
-    try {
-      if (!filePath) return;
-      
-      // S'assurer que le répertoire existe
-      const dirPath = path.dirname(filePath);
-      if (!fs.existsSync(dirPath)) {
-        fs.mkdirSync(dirPath, { recursive: true });
-      }
-      
-      const timestamp = this.getTimestamp();
-      
-      // Format JSON pour entrée structurée
-      const logEntry = {
-        timestamp,
-        level,
-        message,
-        data: data === null ? undefined : data
-      };
-      
-      // Ajouter les détails d'erreur si présent
-      if (error) {
-        logEntry.error = {
-          message: error.message,
-          stack: error.stack
-        };
-      }
-      
-      // Écrire l'entrée en format JSON
-      fs.appendFileSync(filePath, JSON.stringify(logEntry) + '\n');
-      
-      // Si c'est un fichier d'erreur et que l'entrée est une erreur, utiliser un format plus lisible
-      if ((level === 'ERROR' || level === 'CRITICAL') && filePath === this.errorLogPath) {
-        fs.appendFileSync(
-          filePath,
-          `[${timestamp}] ${level}: ${message}\n${error ? error.stack + '\n\n' : '\n'}`
-        );
-      }
-    } catch (err) {
-      console.error(chalk.red(`Failed to write to log file (${filePath}): ${err.message}`));
-    }
-  }
-  
-  /**
-   * Crée un nouveau fichier de log avec un préfixe spécifique
-   * @param {string} prefix - Préfixe pour le nom du fichier
-   * @returns {string} Chemin du nouveau fichier log
-   */
-  createLogFile(prefix) {
-    // Générer un nom unique avec timestamp
-    const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
-    const fileName = `${prefix}_${timestamp}.log`;
-    const filePath = path.join(this.logDir, fileName);
-    
-    // Créer un fichier vide
-    fs.writeFileSync(filePath, '');
-    
-    // Ajouter au système de rotation
-    logRotation.watchFile(filePath);
-    
-    return filePath;
-  }
-  
-  /**
-   * Crée un nouveau fichier de log pour un composant spécifique
+   * Crée un logger spécifique à un composant
    * @param {string} component - Nom du composant
-   * @returns {Object} Interface de logger spécifique au composant
+   * @returns {Object} Logger avec préfixe de composant
    */
   createComponentLogger(component) {
     return {
+      debug: (message, data) => this.debug(`[${component}] ${message}`, data),
       info: (message, data) => this.info(`[${component}] ${message}`, data),
       success: (message, data) => this.success(`[${component}] ${message}`, data),
       warn: (message, data) => this.warn(`[${component}] ${message}`, data),
       error: (message, error) => this.error(`[${component}] ${message}`, error),
-      debug: (message, data) => this.debug(`[${component}] ${message}`, data),
-      trade: (message, data) => this.trade(`[${component}] ${message}`, data),
-      system: (message, data) => this.system(`[${component}] ${message}`, data),
-      critical: (message, error) => this.critical(`[${component}] ${message}`, error)
+      critical: (message, error) => this.critical(`[${component}] ${message}`, error),
+      trade: (message, data) => this.trade(`[${component}] ${message}`, data)
     };
+  }
+  
+  /**
+   * Change la configuration du logger
+   * @param {Object} newConfig - Nouvelle configuration
+   */
+  updateConfig(newConfig) {
+    this.config = { ...this.config, ...newConfig };
+    this.ensureLogDirectory();
+    this.logFilePath = path.join(this.config.logDir, this.config.logFile);
+    this.errorFilePath = path.join(this.config.logDir, this.config.errorFile);
+    this.syncLogFiles();
   }
 }
 
-// Exporter une instance unique
+// Exporter une instance singleton
 export default new Logger();
