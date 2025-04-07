@@ -17,7 +17,7 @@ import chalk from 'chalk';
  * @param {Object} options - Optional configuration parameters
  * @returns {Object} Comprehensive analysis with potential score and risk assessment
  */
-export function analyzeTokenROI(token, options = {}) {
+export function evaluateTokenROI(token, options = {}) {
   try {
     // Initialize scoring components with weighted factors
     const scoreComponents = {
@@ -408,6 +408,6 @@ export function quickROIAssessment(token) {
 }
 
 export default {
-  analyzeTokenROI,
+  evaluateTokenROI,
   quickROIAssessment
 };

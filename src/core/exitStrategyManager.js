@@ -4,27 +4,27 @@ import config from '../config/index.js';
 import { getPairInfo } from '../api/dexscreener.js';
 
 /**
- * Advanced exit strategy manager with dynamic trailing stops,
- * multi-stage take profits, and trend reversal detection
+ * Gestionnaire avancé de stratégies de sortie avec trailing stops dynamiques,
+ * prises de profit multi-étages, et détection de renversement de tendance
  */
 class ExitStrategyManager {
   /**
-   * Initialize exit strategy for a token position
-   * @param {Object} position - Token position data
-   * @param {Object} baseStrategy - Base strategy parameters
+   * Initialise une stratégie de sortie pour une position
+   * @param {Object} position - Données de la position
+   * @param {Object} baseStrategy - Paramètres de stratégie de base
    */
   constructor(position, baseStrategy = {}) {
     this.position = position;
     
-    // Set up base strategy with defaults
+    // Configuration de la stratégie de base avec valeurs par défaut
     this.strategy = {
-      // Take profit levels (% gain)
+      // Niveaux de prise de profit (% de gain)
       takeProfitLevels: baseStrategy.takeProfitLevels || [25, 50, 100],
-      // Take profit amounts (% of position to sell at each level)
+      // Montants de prise de profit (% de la position à vendre à chaque niveau)
       takeProfitAmounts: baseStrategy.takeProfitAmounts || [0.25, 0.5, 0.25],
-      // Stop loss level (% loss)
+      // Niveau de stop loss (% de perte)
       stopLoss: baseStrategy.stopLoss || -15,
-      // Trailing stop settings
+      // Paramètres du trailing stop
       trailingStop: {
         enabled: baseStrategy.trailingStopEnabled !== false,
         activationPercent: baseStrategy.trailingStopActivation || 20,
@@ -32,32 +32,32 @@ class ExitStrategyManager {
         active: false,
         price: 0
       },
-      // Time-based exit (minutes)
+      // Sortie basée sur le temps (minutes)
       maxHoldTime: baseStrategy.maxHoldTime || 60,
-      // Trend monitoring
+      // Monitoring de tendance
       trendMonitoring: {
         enabled: baseStrategy.trendMonitoringEnabled !== false,
-        reversalSensitivity: baseStrategy.reversalSensitivity || 3, // 1-5 scale
+        reversalSensitivity: baseStrategy.reversalSensitivity || 3, // Échelle 1-5
         inProfitExitOnReversal: baseStrategy.exitOnReversal !== false
       },
-      // Completed take profit levels
+      // Niveaux de prise de profit complétés
       completedLevels: new Set(),
-      // Execution tracking
+      // Historique d'exécution
       executionHistory: []
     };
     
-    // Price tracking
+    // Suivi des prix
     this.priceHistory = [];
     this.highestPrice = position.entryPrice || 0;
     this.lowestPrice = position.entryPrice || Infinity;
     this.lastPrice = position.entryPrice || 0;
     
-    // Initialize
+    // Initialisation
     this.initialize();
   }
   
   /**
-   * Initialize strategy with entry price
+   * Initialise la stratégie avec le prix d'entrée
    */
   initialize() {
     if (this.position.entryPrice) {
@@ -65,33 +65,33 @@ class ExitStrategyManager {
       this.lowestPrice = this.position.entryPrice;
       this.lastPrice = this.position.entryPrice;
       
-      // Initialize trailing stop price
+      // Initialiser le prix du trailing stop
       if (this.strategy.trailingStop.enabled) {
         this.strategy.trailingStop.price = this.position.entryPrice * 
           (1 - (this.strategy.stopLoss / 100));
       }
       
-      logger.debug(`Exit strategy initialized for ${this.position.tokenName} with entry price ${this.position.entryPrice}`);
+      logger.debug(`Stratégie de sortie initialisée pour ${this.position.tokenName} avec prix d'entrée ${this.position.entryPrice}`);
     } else {
-      logger.warn(`Unable to initialize exit strategy: missing entry price for ${this.position.tokenName}`);
+      logger.warn(`Impossible d'initialiser la stratégie de sortie: prix d'entrée manquant pour ${this.position.tokenName}`);
     }
   }
   
   /**
-   * Update current market price and related statistics
-   * @param {number} currentPrice - Current token price
-   * @returns {Object} Updated price metrics
+   * Met à jour le prix actuel du marché et les statistiques associées
+   * @param {number} currentPrice - Prix actuel du token
+   * @returns {Object} Métriques de prix mises à jour
    */
   updatePrice(currentPrice) {
     if (!currentPrice || currentPrice <= 0) return null;
     
     this.lastPrice = currentPrice;
     
-    // Update highest/lowest prices
+    // Mettre à jour les prix max/min
     if (currentPrice > this.highestPrice) {
       this.highestPrice = currentPrice;
       
-      // If trailing stop is active, update stop price
+      // Si le trailing stop est actif, mettre à jour le prix stop
       if (this.strategy.trailingStop.active) {
         this.updateTrailingStop();
       }
@@ -101,20 +101,20 @@ class ExitStrategyManager {
       this.lowestPrice = currentPrice;
     }
     
-    // Add to price history (max 50 points)
+    // Ajouter à l'historique des prix (max 50 points)
     this.priceHistory.push({
       price: currentPrice,
       timestamp: Date.now()
     });
     
     if (this.priceHistory.length > 50) {
-      this.priceHistory.shift(); // Remove oldest
+      this.priceHistory.shift(); // Supprimer le plus ancien
     }
     
-    // Update ROI
+    // Mettre à jour le ROI
     const currentRoi = this.getCurrentRoi();
     
-    // Check if trailing stop should be activated
+    // Vérifier si le trailing stop doit être activé
     if (this.strategy.trailingStop.enabled && 
         !this.strategy.trailingStop.active && 
         currentRoi >= this.strategy.trailingStop.activationPercent) {
@@ -132,30 +132,31 @@ class ExitStrategyManager {
   }
   
   /**
-   * Gets current ROI based on entry price
-   * @returns {number} Current ROI percentage
+   * Obtient le ROI actuel basé sur le prix d'entrée
+   * @returns {number} Pourcentage de ROI actuel
    */
   getCurrentRoi() {
     if (!this.position.entryPrice || this.position.entryPrice === 0) return 0;
     
-    return ((this.lastPrice - this.position.entryPrice) / this.position.entryPrice) * 100;
+    return ((this.lastPrice - this.position.entryPrice) / 
+      this.position.entryPrice) * 100;
   }
   
   /**
-   * Activates trailing stop
+   * Active le trailing stop
    */
   activateTrailingStop() {
     this.strategy.trailingStop.active = true;
     this.updateTrailingStop();
     
     logger.debug(
-      `Trailing stop activated for ${this.position.tokenName} at ${this.lastPrice} ` +
+      `Trailing stop activé pour ${this.position.tokenName} à ${this.lastPrice} ` +
       `(ROI: ${this.getCurrentRoi().toFixed(2)}%)`
     );
   }
   
   /**
-   * Updates trailing stop price based on highest price
+   * Met à jour le prix du trailing stop basé sur le prix le plus haut
    */
   updateTrailingStop() {
     if (!this.strategy.trailingStop.active) return;
@@ -164,46 +165,46 @@ class ExitStrategyManager {
     this.strategy.trailingStop.price = this.highestPrice - trailAmount;
     
     logger.debug(
-      `Trailing stop updated for ${this.position.tokenName} to ${this.strategy.trailingStop.price} ` +
-      `(${this.strategy.trailingStop.trailPercent}% below ${this.highestPrice})`
+      `Trailing stop mis à jour pour ${this.position.tokenName} à ${this.strategy.trailingStop.price.toFixed(8)} ` +
+      `(${this.strategy.trailingStop.trailPercent}% sous ${this.highestPrice})`
     );
   }
   
   /**
-   * Detects price trend reversal
-   * @returns {Object|null} Reversal details if detected, null otherwise
+   * Détecte un renversement de tendance du prix
+   * @returns {Object|null} Détails du renversement si détecté, sinon null
    */
   detectReversal() {
-    // Need enough price history for analysis
+    // Besoin de suffisamment d'historique pour l'analyse
     if (this.priceHistory.length < 6) return null;
     
-    // Get recent price points (last 6 data points)
+    // Récupérer les points de prix récents (6 derniers points)
     const recentPrices = this.priceHistory.slice(-6);
     
-    // Calculate short-term trend (last 3 points)
+    // Calculer tendance à court terme (3 derniers points)
     const shortTermPoints = recentPrices.slice(-3);
     const shortTermStart = shortTermPoints[0].price;
     const shortTermEnd = shortTermPoints[shortTermPoints.length - 1].price;
     const shortTermChange = ((shortTermEnd - shortTermStart) / shortTermStart) * 100;
     
-    // Calculate medium-term trend (all 6 points)
+    // Calculer tendance à moyen terme (tous les 6 points)
     const mediumTermStart = recentPrices[0].price;
     const mediumTermChange = ((shortTermEnd - mediumTermStart) / mediumTermStart) * 100;
     
-    // Detect potential reversal (short-term trend opposite of medium-term)
+    // Détecter un renversement potentiel (tendance court terme opposée à moyen terme)
     if (Math.sign(shortTermChange) !== Math.sign(mediumTermChange) && 
         Math.abs(shortTermChange) > 2) {
       
       const sensitivity = this.strategy.trendMonitoring.reversalSensitivity;
-      const significanceThreshold = 6 - sensitivity; // Higher sensitivity = lower threshold
+      const significanceThreshold = 6 - sensitivity; // Sensibilité plus élevée = seuil plus bas
       
-      // Only report significant reversals
+      // Ne rapporter que les renversements significatifs
       if (Math.abs(shortTermChange) >= significanceThreshold) {
         return {
           detected: true,
           shortTermChange,
           mediumTermChange,
-          severity: Math.min(5, Math.floor(Math.abs(shortTermChange) / 2)), // 1-5 scale
+          severity: Math.min(5, Math.floor(Math.abs(shortTermChange) / 2)), // Échelle 1-5
           timestamp: Date.now()
         };
       }
@@ -213,23 +214,23 @@ class ExitStrategyManager {
   }
 
   /**
-   * Checks if any take profit levels have been reached
-   * @returns {Object|null} Take profit details if triggered, null otherwise
+   * Vérifie si des niveaux de prise de profit ont été atteints
+   * @returns {Object|null} Détails de prise de profit si déclenchée, sinon null
    */
   checkTakeProfitLevels() {
     const currentRoi = this.getCurrentRoi();
     
-    // If not in profit, no take profit to check
+    // Si pas en profit, pas de prise de profit à vérifier
     if (currentRoi <= 0) return null;
     
-    // Check each take profit level that hasn't been completed
+    // Vérifier chaque niveau de prise de profit non complété
     for (let i = 0; i < this.strategy.takeProfitLevels.length; i++) {
       const level = this.strategy.takeProfitLevels[i];
       
-      // Skip completed levels
+      // Ignorer les niveaux déjà complétés
       if (this.strategy.completedLevels.has(level)) continue;
       
-      // Check if this level has been reached
+      // Vérifier si ce niveau a été atteint
       if (currentRoi >= level) {
         const sellAmount = this.strategy.takeProfitAmounts[i] * this.position.amount;
         
@@ -239,7 +240,7 @@ class ExitStrategyManager {
           roi: currentRoi,
           sellAmount,
           sellPortion: this.strategy.takeProfitAmounts[i],
-          reason: `Take Profit Level ${level}% reached (${currentRoi.toFixed(2)}%)`,
+          reason: `Niveau de prise de profit ${level}% atteint (${currentRoi.toFixed(2)}%)`,
           type: 'TAKE_PROFIT'
         };
       }
@@ -249,21 +250,21 @@ class ExitStrategyManager {
   }
   
   /**
-   * Checks if stop loss has been triggered
-   * @returns {Object|null} Stop loss details if triggered, null otherwise
+   * Vérifie si le stop loss a été déclenché
+   * @returns {Object|null} Détails du stop loss si déclenché, sinon null
    */
   checkStopLoss() {
     const currentRoi = this.getCurrentRoi();
     
-    // Check if ROI is below stop loss level
+    // Vérifier si le ROI est sous le niveau de stop loss
     if (currentRoi <= this.strategy.stopLoss) {
       return {
         triggered: true,
         level: this.strategy.stopLoss,
         roi: currentRoi,
-        sellAmount: this.position.amount, // Sell entire position
+        sellAmount: this.position.amount, // Vendre toute la position
         sellPortion: 1.0,
-        reason: `Stop Loss triggered at ${currentRoi.toFixed(2)}% (threshold: ${this.strategy.stopLoss}%)`,
+        reason: `Stop Loss déclenché à ${currentRoi.toFixed(2)}% (seuil: ${this.strategy.stopLoss}%)`,
         type: 'STOP_LOSS'
       };
     }
@@ -272,14 +273,14 @@ class ExitStrategyManager {
   }
   
   /**
-   * Checks if trailing stop has been triggered
-   * @returns {Object|null} Trailing stop details if triggered, null otherwise
+   * Vérifie si le trailing stop a été déclenché
+   * @returns {Object|null} Détails du trailing stop si déclenché, sinon null
    */
   checkTrailingStop() {
-    // Only check if trailing stop is active
+    // Vérifier uniquement si le trailing stop est actif
     if (!this.strategy.trailingStop.active) return null;
     
-    // Check if price dropped below trailing stop level
+    // Vérifier si le prix est tombé sous le niveau du trailing stop
     if (this.lastPrice <= this.strategy.trailingStop.price) {
       const currentRoi = this.getCurrentRoi();
       
@@ -287,9 +288,9 @@ class ExitStrategyManager {
         triggered: true,
         level: this.strategy.trailingStop.price,
         roi: currentRoi,
-        sellAmount: this.position.amount, // Sell entire position
+        sellAmount: this.position.amount, // Vendre toute la position
         sellPortion: 1.0,
-        reason: `Trailing Stop triggered at ${this.lastPrice.toFixed(8)} (${currentRoi.toFixed(2)}%)`,
+        reason: `Trailing Stop déclenché à ${this.lastPrice.toFixed(8)} (${currentRoi.toFixed(2)}%)`,
         type: 'TRAILING_STOP'
       };
     }
@@ -298,8 +299,8 @@ class ExitStrategyManager {
   }
   
   /**
-   * Checks if maximum hold time has been reached
-   * @returns {Object|null} Time exit details if triggered, null otherwise
+   * Vérifie si le temps maximum de détention a été atteint
+   * @returns {Object|null} Détails de sortie temporelle si déclenchée, sinon null
    */
   checkTimeExit() {
     if (!this.position.entryTime) return null;
@@ -307,7 +308,7 @@ class ExitStrategyManager {
     const holdingTimeMs = Date.now() - this.position.entryTime;
     const holdingTimeMinutes = holdingTimeMs / (1000 * 60);
     
-    // Check if we've exceeded maximum hold time
+    // Vérifier si nous avons dépassé le temps maximum de détention
     if (holdingTimeMinutes >= this.strategy.maxHoldTime) {
       const currentRoi = this.getCurrentRoi();
       
@@ -315,9 +316,9 @@ class ExitStrategyManager {
         triggered: true,
         holdingTimeMinutes,
         roi: currentRoi,
-        sellAmount: this.position.amount, // Sell entire position
+        sellAmount: this.position.amount, // Vendre toute la position
         sellPortion: 1.0,
-        reason: `Maximum hold time reached: ${holdingTimeMinutes.toFixed(1)} minutes (${this.strategy.maxHoldTime} min limit)`,
+        reason: `Temps maximum de détention atteint: ${holdingTimeMinutes.toFixed(1)} minutes (limite: ${this.strategy.maxHoldTime} min)`,
         type: 'TIME_EXIT'
       };
     }
@@ -326,25 +327,25 @@ class ExitStrategyManager {
   }
   
   /**
-   * Checks if trend reversal warrants an exit
-   * @returns {Object|null} Trend exit details if triggered, null otherwise
+   * Vérifie si un renversement de tendance justifie une sortie
+   * @returns {Object|null} Détails de sortie de tendance si déclenchée, sinon null
    */
   checkTrendExit() {
-    // Only check if trend monitoring is enabled
+    // Vérifier uniquement si le monitoring de tendance est activé
     if (!this.strategy.trendMonitoring.enabled) return null;
     
-    // Check for reversal
+    // Vérifier le renversement
     const reversal = this.detectReversal();
     
-    // Only exit on reversal if in profit and reversal is significant
+    // Sortir sur renversement uniquement si en profit et renversement significatif
     if (reversal && reversal.detected && 
         this.strategy.trendMonitoring.inProfitExitOnReversal) {
       
       const currentRoi = this.getCurrentRoi();
       
-      // Only exit if we're in profit and reversal severity is high enough
+      // Sortir uniquement si en profit et sévérité du renversement suffisante
       if (currentRoi > 5 && reversal.severity >= 3) {
-        // Scale sell amount based on severity and ROI
+        // Calculer portion de vente basée sur sévérité et ROI
         const sellPortion = Math.min(0.75, 0.25 * reversal.severity * (currentRoi / 20));
         const sellAmount = this.position.amount * sellPortion;
         
@@ -354,7 +355,7 @@ class ExitStrategyManager {
           roi: currentRoi,
           sellAmount,
           sellPortion,
-          reason: `Trend reversal detected (severity: ${reversal.severity}/5) while in profit (${currentRoi.toFixed(2)}%)`,
+          reason: `Renversement de tendance détecté (sévérité: ${reversal.severity}/5) en profit (${currentRoi.toFixed(2)}%)`,
           type: 'TREND_REVERSAL'
         };
       }
@@ -364,39 +365,39 @@ class ExitStrategyManager {
   }
   
   /**
-   * Checks all exit conditions and returns the recommended action
-   * @returns {Object} Exit recommendation
+   * Vérifie toutes les conditions de sortie et renvoie l'action recommandée
+   * @returns {Object} Recommandation de sortie
    */
   checkExitConditions() {
-    // Update current price from market if not already updated
+    // Mettre à jour le prix actuel du marché si fonction disponible
     if (this.position.getCurrentPrice) {
       const currentPrice = this.position.getCurrentPrice();
       this.updatePrice(currentPrice);
     }
     
-    // Check all exit conditions in priority order
+    // Vérifier toutes les conditions de sortie par ordre de priorité
     
-    // 1. Check stop loss (highest priority)
+    // 1. Vérifier stop loss (priorité la plus haute)
     const stopLoss = this.checkStopLoss();
     if (stopLoss) return stopLoss;
     
-    // 2. Check trailing stop
+    // 2. Vérifier trailing stop
     const trailingStop = this.checkTrailingStop();
     if (trailingStop) return trailingStop;
     
-    // 3. Check take profit levels
+    // 3. Vérifier niveaux de prise de profit
     const takeProfit = this.checkTakeProfitLevels();
     if (takeProfit) return takeProfit;
     
-    // 4. Check trend reversal exit
+    // 4. Vérifier sortie sur renversement de tendance
     const trendExit = this.checkTrendExit();
     if (trendExit) return trendExit;
     
-    // 5. Check time-based exit (lowest priority)
+    // 5. Vérifier sortie temporelle (priorité la plus basse)
     const timeExit = this.checkTimeExit();
     if (timeExit) return timeExit;
     
-    // No exit condition triggered
+    // Aucune condition de sortie déclenchée
     return {
       triggered: false,
       roi: this.getCurrentRoi(),
@@ -407,13 +408,13 @@ class ExitStrategyManager {
   }
   
   /**
-   * Records execution of an exit strategy
-   * @param {Object} exit - Exit details
-   * @param {Object} result - Execution result
-   * @returns {Object} Recorded exit with execution result
+   * Enregistre l'exécution d'une stratégie de sortie
+   * @param {Object} exit - Détails de la sortie
+   * @param {Object} result - Résultat de l'exécution
+   * @returns {Object} Sortie enregistrée avec résultat d'exécution
    */
   recordExit(exit, result) {
-    // Record in execution history
+    // Enregistrer dans l'historique d'exécution
     this.strategy.executionHistory.push({
       timestamp: Date.now(),
       type: exit.type,
@@ -430,14 +431,14 @@ class ExitStrategyManager {
       }
     });
     
-    // If take profit, mark level as completed
+    // Si prise de profit, marquer le niveau comme complété
     if (exit.type === 'TAKE_PROFIT') {
       this.strategy.completedLevels.add(exit.level);
     }
     
     logger.debug(
-      `Exit executed for ${this.position.tokenName}: ${exit.type}, ${result.success ? 'SUCCESS' : 'FAILED'}, ` +
-      `ROI: ${exit.roi.toFixed(2)}%, Amount: ${exit.sellAmount}`
+      `Sortie exécutée pour ${this.position.tokenName}: ${exit.type}, ${result.success ? 'SUCCÈS' : 'ÉCHEC'}, ` +
+      `ROI: ${exit.roi.toFixed(2)}%, Montant: ${exit.sellAmount}`
     );
     
     return {
@@ -448,27 +449,27 @@ class ExitStrategyManager {
   }
   
   /**
-   * Adjusts strategy parameters based on market conditions and performance
-   * @param {Object} params - New strategy parameters
-   * @returns {Object} Updated strategy configuration
+   * Ajuste les paramètres de stratégie en fonction des conditions de marché
+   * @param {Object} params - Nouveaux paramètres de stratégie
+   * @returns {Object} Configuration de stratégie mise à jour
    */
   adjustStrategy(params = {}) {
-    // Update stop loss
+    // Mettre à jour le stop loss
     if (params.stopLoss !== undefined && params.stopLoss < 0) {
       this.strategy.stopLoss = params.stopLoss;
     }
     
-    // Update take profit levels
+    // Mettre à jour les niveaux de prise de profit
     if (params.takeProfitLevels && Array.isArray(params.takeProfitLevels)) {
       this.strategy.takeProfitLevels = params.takeProfitLevels;
     }
     
-    // Update take profit amounts
+    // Mettre à jour les montants de prise de profit
     if (params.takeProfitAmounts && Array.isArray(params.takeProfitAmounts)) {
       this.strategy.takeProfitAmounts = params.takeProfitAmounts;
     }
     
-    // Update trailing stop settings
+    // Mettre à jour les paramètres du trailing stop
     if (params.trailingStop) {
       if (params.trailingStop.activationPercent !== undefined) {
         this.strategy.trailingStop.activationPercent = params.trailingStop.activationPercent;
@@ -477,7 +478,7 @@ class ExitStrategyManager {
       if (params.trailingStop.trailPercent !== undefined) {
         this.strategy.trailingStop.trailPercent = params.trailingStop.trailPercent;
         
-        // If already active, update trail price
+        // Si déjà actif, mettre à jour le prix trail
         if (this.strategy.trailingStop.active) {
           this.updateTrailingStop();
         }
@@ -488,12 +489,12 @@ class ExitStrategyManager {
       }
     }
     
-    // Update max hold time
+    // Mettre à jour le temps max de détention
     if (params.maxHoldTime !== undefined && params.maxHoldTime > 0) {
       this.strategy.maxHoldTime = params.maxHoldTime;
     }
     
-    // Update trend monitoring settings
+    // Mettre à jour les paramètres de monitoring des tendances
     if (params.trendMonitoring) {
       if (params.trendMonitoring.enabled !== undefined) {
         this.strategy.trendMonitoring.enabled = params.trendMonitoring.enabled;
@@ -508,14 +509,14 @@ class ExitStrategyManager {
       }
     }
     
-    logger.debug(`Strategy adjusted for ${this.position.tokenName}`, params);
+    logger.debug(`Stratégie ajustée pour ${this.position.tokenName}`, params);
     
     return { ...this.strategy };
   }
   
   /**
-   * Gets current strategy settings and status
-   * @returns {Object} Strategy details and current state
+   * Obtient les paramètres de stratégie actuels et l'état
+   * @returns {Object} Détails de la stratégie et état actuel
    */
   getStrategyStatus() {
     return {
@@ -545,5 +546,5 @@ class ExitStrategyManager {
   }
 }
 
-// Export the class
+// Exporter la classe
 export default ExitStrategyManager;

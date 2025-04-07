@@ -6,14 +6,17 @@ import config from '../config/index.js';
 import logRotation from './logRotation.js';
 
 /**
- * Service de journalisation amélioré avec sortie console colorée
+ * Service de logging amélioré avec sortie console colorée
  * et journalisation structurée dans des fichiers avec rotation automatique
  */
 class Logger {
+  /**
+   * Initialise le logger avec configuration par défaut
+   */
   constructor() {
     this.debugMode = config.get('DEBUG');
-    this.logDir = path.dirname(config.get('LOG_FILE_PATH'));
-    this.errorLogPath = config.get('ERROR_LOG_PATH');
+    this.logDir = path.dirname(config.get('LOG_FILE_PATH') || './logs/app.log');
+    this.errorLogPath = config.get('ERROR_LOG_PATH') || path.join(this.logDir, 'error.log');
     this.tradeLogPath = path.join(this.logDir, 'trades.log');
     this.appLogPath = path.join(this.logDir, 'app.log');
     
@@ -47,7 +50,15 @@ class Logger {
   }
   
   /**
-   * Enregistre un message de type info
+   * Génère un timestamp formaté pour les logs
+   * @returns {string} Timestamp ISO
+   */
+  getTimestamp() {
+    return new Date().toISOString();
+  }
+  
+  /**
+   * Journalise un message de type info
    * @param {string} message - Message à journaliser
    * @param {Object} data - Données optionnelles à inclure
    */
@@ -57,7 +68,7 @@ class Logger {
   }
   
   /**
-   * Enregistre un message de succès
+   * Journalise un message de succès
    * @param {string} message - Message à journaliser
    * @param {Object} data - Données optionnelles à inclure
    */
@@ -67,7 +78,7 @@ class Logger {
   }
   
   /**
-   * Enregistre un message d'avertissement
+   * Journalise un message d'avertissement
    * @param {string} message - Message à journaliser
    * @param {Object} data - Données optionnelles à inclure
    */
@@ -77,7 +88,7 @@ class Logger {
   }
   
   /**
-   * Enregistre un message d'erreur
+   * Journalise un message d'erreur
    * @param {string} message - Message à journaliser
    * @param {Error} error - Objet d'erreur optionnel
    */
@@ -97,7 +108,23 @@ class Logger {
   }
   
   /**
-   * Enregistre un message de debug (uniquement en mode debug)
+   * Journalise un message critique (erreur fatale)
+   * @param {string} message - Message à journaliser
+   * @param {Error} error - Objet d'erreur optionnel
+   */
+  critical(message, error = null) {
+    console.log(chalk.bgRed.white(`💀 CRITICAL: ${message}`));
+    if (error) {
+      console.log(chalk.red(error.stack));
+    }
+    
+    // Écriture dans le fichier de log général et d'erreurs
+    this.writeToFile('CRITICAL', message, null, this.appLogPath, error);
+    this.writeToFile('CRITICAL', message, null, this.errorLogPath, error);
+  }
+  
+  /**
+   * Journalise un message de debug (uniquement en mode debug)
    * @param {string} message - Message à journaliser
    * @param {any} data - Données optionnelles à afficher
    */
@@ -105,14 +132,14 @@ class Logger {
     if (this.debugMode) {
       console.log(chalk.magenta(`🔍 DEBUG: ${message}`));
       if (data !== undefined) {
-        console.log(chalk.gray(JSON.stringify(data, null, 2)));
+        console.log(chalk.gray(typeof data === 'string' ? data : JSON.stringify(data, null, 2)));
       }
       this.writeToFile('DEBUG', message, data, this.appLogPath);
     }
   }
   
   /**
-   * Enregistre un message lié au trading
+   * Journalise un message lié au trading
    * @param {string} message - Message à journaliser
    * @param {Object} data - Données optionnelles de trading
    */
@@ -124,6 +151,16 @@ class Logger {
     
     // Écrire dans le fichier de trades spécifique
     this.writeToFile('TRADE', message, data, this.tradeLogPath);
+  }
+  
+  /**
+   * Journalise un message lié au système
+   * @param {string} message - Message à journaliser
+   * @param {Object} data - Données optionnelles système
+   */
+  system(message, data = null) {
+    console.log(chalk.hex('#FF8800')(`🔧 SYSTEM: ${message}`));
+    this.writeToFile('SYSTEM', message, data, this.appLogPath);
   }
   
   /**
@@ -144,14 +181,14 @@ class Logger {
         fs.mkdirSync(dirPath, { recursive: true });
       }
       
-      const timestamp = new Date().toISOString();
+      const timestamp = this.getTimestamp();
       
       // Format JSON pour entrée structurée
       const logEntry = {
         timestamp,
         level,
         message,
-        data: data || undefined
+        data: data === null ? undefined : data
       };
       
       // Ajouter les détails d'erreur si présent
@@ -166,10 +203,10 @@ class Logger {
       fs.appendFileSync(filePath, JSON.stringify(logEntry) + '\n');
       
       // Si c'est un fichier d'erreur et que l'entrée est une erreur, utiliser un format plus lisible
-      if (level === 'ERROR' && filePath === this.errorLogPath) {
+      if ((level === 'ERROR' || level === 'CRITICAL') && filePath === this.errorLogPath) {
         fs.appendFileSync(
           filePath,
-          `[${timestamp}] ERROR: ${message}\n${error ? error.stack + '\n\n' : '\n'}`
+          `[${timestamp}] ${level}: ${message}\n${error ? error.stack + '\n\n' : '\n'}`
         );
       }
     } catch (err) {
@@ -195,6 +232,24 @@ class Logger {
     logRotation.watchFile(filePath);
     
     return filePath;
+  }
+  
+  /**
+   * Crée un nouveau fichier de log pour un composant spécifique
+   * @param {string} component - Nom du composant
+   * @returns {Object} Interface de logger spécifique au composant
+   */
+  createComponentLogger(component) {
+    return {
+      info: (message, data) => this.info(`[${component}] ${message}`, data),
+      success: (message, data) => this.success(`[${component}] ${message}`, data),
+      warn: (message, data) => this.warn(`[${component}] ${message}`, data),
+      error: (message, error) => this.error(`[${component}] ${message}`, error),
+      debug: (message, data) => this.debug(`[${component}] ${message}`, data),
+      trade: (message, data) => this.trade(`[${component}] ${message}`, data),
+      system: (message, data) => this.system(`[${component}] ${message}`, data),
+      critical: (message, error) => this.critical(`[${component}] ${message}`, error)
+    };
   }
 }
 

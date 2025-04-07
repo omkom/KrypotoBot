@@ -12,6 +12,9 @@ import chalk from 'chalk';
  * avec archivage automatique des fichiers anciens
  */
 class LogRotation {
+  /**
+   * Initialise le système de rotation des logs avec configuration par défaut
+   */
   constructor() {
     // Configuration par défaut
     this.config = {
@@ -33,7 +36,7 @@ class LogRotation {
     
     // Timer pour vérification périodique
     this.checkTimer = null;
-    // Liste des fichiers en cours de surveillance
+    // Liste des fichiers en surveillance
     this.watchedFiles = new Map();
     
     // Démarrer la surveillance périodique
@@ -59,6 +62,7 @@ class LogRotation {
   /**
    * Ajoute un fichier à surveiller pour rotation
    * @param {string} filePath - Chemin du fichier log
+   * @returns {string} Chemin du fichier
    */
   watchFile(filePath) {
     if (!this.watchedFiles.has(filePath)) {
@@ -259,6 +263,17 @@ class LogRotation {
       }
     } catch (error) {
       console.error(chalk.red(`Erreur lors du nettoyage des anciens fichiers logs: ${error.message}`));
+    }
+  }
+  
+  /**
+   * Arrête le monitoring de rotation des logs
+   */
+  stop() {
+    if (this.checkTimer) {
+      clearInterval(this.checkTimer);
+      this.checkTimer = null;
+      console.log(chalk.blue('Système de rotation des logs arrêté'));
     }
   }
 }
