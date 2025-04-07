@@ -5,7 +5,7 @@ import logger from './logger.js';
 import errorHandler, { ErrorSeverity } from './errorHandler.js';
 
 /**
- * Service de connexion MongoDB avec connection pooling,
+ * Service de connexion MongoDB avec connection pooling optimisé,
  * reconnexion automatique et monitoring des performances
  */
 class MongoDBService {
@@ -47,7 +47,10 @@ class MongoDBService {
       // Heartbeat et keepalive pour éviter timeouts
       heartbeatFrequencyMS: 10000,
       keepAlive: true,
-      keepAliveInitialDelay: 30000
+      keepAliveInitialDelay: 30000,
+      // Retry d'écriture automatique 
+      retryWrites: true,
+      retryReads: true
     };
     
     try {
@@ -58,7 +61,7 @@ class MongoDBService {
       
       logger.success('Connexion MongoDB établie avec succès');
     } catch (error) {
-      const handled = errorHandler.handleError(
+      errorHandler.handleError(
         error,
         'database',
         ErrorSeverity.HIGH,
@@ -102,6 +105,9 @@ class MongoDBService {
       this.client.on('error', this.handleError.bind(this));
       this.client.on('timeout', this.handleTimeout.bind(this));
       
+      // Créer les indexes essentiels pour optimiser les requêtes
+      await this.setupIndexes();
+      
       return true;
     } catch (error) {
       this.connected = false;
@@ -125,6 +131,41 @@ class MongoDBService {
       }
       
       return false;
+    }
+  }
+  
+  /**
+   * Configure les index essentiels pour les collections principales
+   */
+  async setupIndexes() {
+    try {
+      // Index pour la collection trades
+      const tradesCollection = this.collection('trades');
+      await tradesCollection.createIndexes([
+        { key: { timestamp: -1 }, name: 'timestamp_desc' },
+        { key: { tokenAddress: 1 }, name: 'token_address' },
+        { key: { 'trade.success': 1 }, name: 'trade_success' }
+      ]);
+      
+      // Index pour la collection tokens
+      const tokensCollection = this.collection('tokens');
+      await tokensCollection.createIndexes([
+        { key: { address: 1 }, name: 'token_address_unique', unique: true },
+        { key: { symbol: 1 }, name: 'token_symbol' },
+        { key: { firstSeen: -1 }, name: 'first_seen_desc' }
+      ]);
+      
+      // Index pour la collection analytics
+      const analyticsCollection = this.collection('analytics');
+      await analyticsCollection.createIndexes([
+        { key: { date: -1 }, name: 'date_desc' },
+        { key: { type: 1, date: -1 }, name: 'type_date_desc' }
+      ]);
+      
+      logger.debug('Index MongoDB créés/vérifiés avec succès');
+    } catch (error) {
+      // Une erreur ici ne devrait pas être fatale - juste logger
+      logger.warn(`Erreur lors de la création des index MongoDB: ${error.message}`);
     }
   }
   
@@ -294,10 +335,38 @@ class MongoDBService {
         error,
         'database',
         ErrorSeverity.MEDIUM,
-        { database: 'mongodb', operation: 'find', collection: collectionName }
+        { database: 'mongodb', operation: 'find', collection: collectionName, query }
       );
       
       logger.error(`Erreur lors de find dans ${collectionName}: ${error.message}`);
+      throw error;
+    }
+  }
+  
+  /**
+   * Trouve un document unique par critères
+   * @param {string} collectionName - Nom de la collection
+   * @param {Object} query - Critères de recherche
+   * @param {Object} options - Options de la requête
+   * @returns {Promise<Object|null>} Document trouvé ou null
+   */
+  async findOne(collectionName, query = {}, options = {}) {
+    await this.checkConnection();
+    
+    try {
+      return await this.measureOperation(async () => {
+        const collection = this.collection(collectionName);
+        return collection.findOne(query, options);
+      }, `findOne:${collectionName}`);
+    } catch (error) {
+      errorHandler.handleError(
+        error,
+        'database',
+        ErrorSeverity.MEDIUM,
+        { database: 'mongodb', operation: 'findOne', collection: collectionName, query }
+      );
+      
+      logger.error(`Erreur lors de findOne dans ${collectionName}: ${error.message}`);
       throw error;
     }
   }
@@ -366,7 +435,7 @@ class MongoDBService {
         error,
         'database',
         ErrorSeverity.MEDIUM,
-        { database: 'mongodb', operation: 'update', collection: collectionName }
+        { database: 'mongodb', operation: 'update', collection: collectionName, filter }
       );
       
       logger.error(`Erreur lors de update dans ${collectionName}: ${error.message}`);
@@ -402,7 +471,7 @@ class MongoDBService {
         error,
         'database',
         ErrorSeverity.MEDIUM,
-        { database: 'mongodb', operation: 'delete', collection: collectionName }
+        { database: 'mongodb', operation: 'delete', collection: collectionName, filter }
       );
       
       logger.error(`Erreur lors de delete dans ${collectionName}: ${error.message}`);
@@ -477,6 +546,34 @@ class MongoDBService {
   }
   
   /**
+   * Compte les documents selon des critères
+   * @param {string} collectionName - Nom de la collection
+   * @param {Object} query - Critères de recherche
+   * @param {Object} options - Options de comptage
+   * @returns {Promise<number>} Nombre de documents
+   */
+  async count(collectionName, query = {}, options = {}) {
+    await this.checkConnection();
+    
+    try {
+      return await this.measureOperation(async () => {
+        const collection = this.collection(collectionName);
+        return collection.countDocuments(query, options);
+      }, `count:${collectionName}`);
+    } catch (error) {
+      errorHandler.handleError(
+        error,
+        'database',
+        ErrorSeverity.LOW,
+        { database: 'mongodb', operation: 'count', collection: collectionName, query }
+      );
+      
+      logger.error(`Erreur lors du comptage dans ${collectionName}: ${error.message}`);
+      throw error;
+    }
+  }
+  
+  /**
    * Obtient les métriques de performance
    * @returns {Object} Métriques de performance
    */
@@ -494,6 +591,10 @@ class MongoDBService {
       errorRate: this.metrics.operations > 0 ? (this.metrics.errors / this.metrics.operations) * 100 : 0,
       avgQueryTime,
       lastReconnect: this.metrics.lastReconnectTime,
+      poolConfig: {
+        maxSize: config.get('MONGO_MAX_POOL_SIZE') || 10,
+        minSize: config.get('MONGO_MIN_POOL_SIZE') || 1
+      },
       recentQueries: this.metrics.queryTimes.slice(-10) // 10 dernières requêtes
     };
   }
@@ -515,5 +616,5 @@ class MongoDBService {
   }
 }
 
-// Exporter une instance unique
+// Exporter une instance singleton
 export default new MongoDBService();
