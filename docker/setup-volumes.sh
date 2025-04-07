@@ -94,4 +94,4 @@ for file in "${PLACEHOLDER_FILES[@]}"; do
 done
 
 echo -e "${GREEN}=== Configuration des volumes terminée avec succès ===${NC}"
-echo -e "${YELLOW}Vous pouvez maintenant démarrer les conteneurs avec 'docker-compose up -d'${NC}"
+echo -e "${YELLOW}Vous pouvez maintenant démarrer les conteneurs avec 'docker compose up -d'${NC}"
