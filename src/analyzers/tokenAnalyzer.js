@@ -3,7 +3,7 @@ console.log('analyzers/tokenAnalyzer.js', '# Main token analysis');
 // src/analyzers/tokenAnalyzer.js
 import logger from '../services/logger.js';
 import config from '../config/index.js';
-import { evaluateTokenROI } from './roiAnalyzer.js';
+import { evaluateTokenROI } from './tokenROIAnalyzer.js';
 
 /**
  * Analyzes a token using multiple factors to determine trade worthiness

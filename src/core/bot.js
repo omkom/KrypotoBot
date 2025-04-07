@@ -21,7 +21,7 @@ import config from '../config/index.js';
 import errorHandler, { ErrorSeverity } from '../services/errorHandler.js';
 import { getLatestTokens, getPairInfo } from '../api/dexscreener.js';
 import { analyzeToken } from '../analyzers/tokenAnalyzer.js';
-import { evaluateTokenROI } from '../analyzers/roiAnalyzer.js';
+import { evaluateTokenROI } from '../analyzers/tokenROIAnalyzer.js';
 import { buyToken, sellToken, optimizeTradeParameters } from './execution.js';
 import { startPositionMonitor, stopMonitoring, getActivePositions } from './monitoring.js';
 import metrics from '../services/metrics.js';
