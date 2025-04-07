@@ -1,6 +1,19 @@
-console.log('core/execution.js', '# Trade execution logic');
+/**
+ * Trade execution module with optimized blockchain operations
+ * 
+ * Handles all token purchase and sale operations with advanced error handling,
+ * transaction retry logic, and performance optimization
+ * 
+ * @module execution
+ * @requires @solana/web3.js
+ * @requires @solana/spl-token
+ * @requires ../services/logger
+ * @requires ../config/index
+ * @requires ../services/errorHandler
+ * @requires ../api/jupiter
+ * @requires ../api/dexscreener
+ */
 
-// src/core/execution.js
 import { PublicKey, Transaction } from '@solana/web3.js';
 import { NATIVE_MINT } from '@solana/spl-token';
 import logger from '../services/logger.js';
@@ -14,7 +27,7 @@ import { getPairInfo } from '../api/dexscreener.js';
  * @param {string} tokenAddress - Token address
  * @param {string} tokenName - Token name/symbol
  * @param {number} amountInSol - Amount to spend in SOL
- * @param {Object} connection - Solana connection
+ * @param {Connection} connection - Solana connection
  * @param {Object} wallet - Wallet keypair
  * @param {Object} options - Additional options
  * @returns {Promise<Object>} Purchase result
@@ -35,6 +48,16 @@ export async function buyToken(tokenAddress, tokenName, amountInSol, connection,
   }
   
   try {
+    // Validate input parameters
+    if (!tokenAddress || !tokenName || !connection || !wallet) {
+      throw new Error('Missing required parameters for token purchase');
+    }
+    
+    // Validate amount
+    if (amountInSol <= 0) {
+      throw new Error(`Invalid swap amount: ${amountInSol} SOL`);
+    }
+    
     // Create token mint address
     const tokenMintAddress = new PublicKey(tokenAddress);
     
@@ -48,10 +71,6 @@ export async function buyToken(tokenAddress, tokenName, amountInSol, connection,
     
     // Real purchase via Jupiter
     logger.trade(`Executing swap: ${amountInSol} SOL -> ${tokenName}`);
-    
-    if (amountInSol <= 0) {
-      throw new Error(`Invalid swap amount: ${amountInSol} SOL`);
-    }
     
     // Execute swap with retry logic for transient failures
     const maxRetries = options.maxRetries || config.get('MAX_RETRIES');
@@ -253,7 +272,7 @@ async function simulatePurchase(tokenAddress, tokenName, amountInSol, connection
  * @param {string} tokenAddress - Token address
  * @param {string} tokenName - Token name/symbol
  * @param {number} amount - Amount of tokens to sell
- * @param {Object} connection - Solana connection
+ * @param {Connection} connection - Solana connection
  * @param {Object} wallet - Wallet keypair
  * @param {Object} options - Additional options
  * @returns {Promise<Object>} Sale result
@@ -274,14 +293,14 @@ export async function sellToken(tokenAddress, tokenName, amount, connection, wal
   }
   
   try {
+    // Validate parameters
+    if (!tokenAddress || !tokenName || amount <= 0) {
+      throw new Error(`Invalid sale parameters: address=${tokenAddress}, amount=${amount}`);
+    }
+    
     // For dry run mode, simulate the sale
     if (isDryRun) {
       return simulateSale(tokenAddress, tokenName, amount, connection);
-    }
-    
-    // Check amount validity
-    if (isNaN(amount) || amount <= 0) {
-      throw new Error(`Invalid token amount: ${amount}`);
     }
     
     // Create token mint address
@@ -330,9 +349,9 @@ export async function sellToken(tokenAddress, tokenName, amount, connection, wal
         
         // Only retry for specific transient errors
         const isRetryable = error.message.includes('timeout') || 
-                           error.message.includes('rate limit') ||
-                           error.message.includes('network error') ||
-                           error.message.includes('connection closed');
+                         error.message.includes('rate limit') ||
+                         error.message.includes('network error') ||
+                         error.message.includes('connection closed');
                            
         if (isRetryable && attempt <= maxRetries) {
           // Calculate backoff with exponential delay and jitter
@@ -389,7 +408,7 @@ export async function sellToken(tokenAddress, tokenName, amount, connection, wal
  * @param {string} tokenAddress - Token address
  * @param {string} tokenName - Token name/symbol
  * @param {number} amount - Amount of tokens to sell
- * @param {Object} connection - Solana connection
+ * @param {Connection} connection - Solana connection
  * @returns {Promise<Object>} Simulated sale result
  */
 async function simulateSale(tokenAddress, tokenName, amount, connection) {
@@ -490,7 +509,7 @@ async function simulateSale(tokenAddress, tokenName, amount, connection) {
  * @returns {Object} Optimized trading parameters
  */
 export function optimizeTradeParameters(analysis) {
-  if (!analysis || !analysis.risk || !analysis.potential || !analysis.tradeable) {
+  if (!analysis || !analysis.roi || !analysis.token) {
     logger.warn('Invalid analysis data for parameter optimization');
     // Return default parameters as fallback
     return {
@@ -508,8 +527,8 @@ export function optimizeTradeParameters(analysis) {
   }
   
   // Extract risk and potential scores
-  const riskScore = analysis.risk.riskScore;
-  const potentialScore = analysis.potential.potentialScore;
+  const riskScore = analysis.token.risk?.riskScore || 50;
+  const potentialScore = analysis.roi.potentialScore || 50;
   
   // Base parameters adjusted by risk level
   let takeProfitPct, stopLossPct, trailingStopActivationPct, 
@@ -584,7 +603,7 @@ export function optimizeTradeParameters(analysis) {
   
   // Calculate position size in SOL
   const maxSolPerTrade = config.get('MAX_SOL_PER_TRADE');
-  const positionSizeSol = maxSolPerTrade * analysis.tradeable.optimalPositionPct * entryScalePct;
+  const positionSizeSol = maxSolPerTrade * (analysis.token.tradeable?.optimalPositionPct || 0.7) * entryScalePct;
   
   // Log parameters if in debug mode
   if (config.get('DEBUG')) {
@@ -612,8 +631,8 @@ export function optimizeTradeParameters(analysis) {
     tradeSummary: {
       riskScore,
       potentialScore,
-      tradeableScore: analysis.tradeable.score,
-      assessment: analysis.tradeable.assessment
+      tradeableScore: analysis.token.tradeable?.score || 50,
+      assessment: analysis.token.tradeable?.assessment || 'Moderate Potential'
     }
   };
 }
