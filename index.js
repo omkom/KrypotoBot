@@ -1378,10 +1378,18 @@ async function calculateTradeAmount(connection, wallet, tradeableScore = 70) {
     
     // Ensure minimum viable trade size
     const minTradeSize = 0.005; // 0.005 SOL minimum to account for fees
+    // Ensure wallet balance is sufficient for minimum trade size plus reserved fee
+    if (WALLET_BALANCE < minTradeSize + 0.002) {
+        logger.warn('Insufficient wallet balance for a viable trade.');
+        return 0; // Return 0 to indicate no trade can be made
+    }
+
     const finalAmount = Math.max(amount, minTradeSize);
     
     // Ensure we don't exceed balance (keep 0.002 SOL for fees)
-    const safeAmount = Math.min(finalAmount, WALLET_BALANCE - 0.002);
+    const safeAmount = WALLET_BALANCE > 0.002 
+      ? Math.min(finalAmount, WALLET_BALANCE - 0.002) 
+      : 0;
     
     logger.debug(
       `Trade amount calculation: ${safeAmount.toFixed(4)} SOL ` +
