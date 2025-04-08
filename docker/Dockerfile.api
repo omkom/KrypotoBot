@@ -1,27 +1,39 @@
-FROM node:18-alpine
+FROM node:18-alpine AS build
 
-RUN apk add --no-cache bash curl
+LABEL maintainer="KryptoBot Team"
+LABEL version="2.0.0"
+LABEL description="Monitoring API Service"
 
 WORKDIR /app
 
-# Optimize npm install
+# Cache dependencies
 COPY package*.json ./
 RUN npm ci --only=production && \
     npm install --no-save express cors helmet compression morgan mongoose redis socket.io && \
     npm cache clean --force
 
-# Remove debug commands
+# Copy and build application
 COPY . .
 
-# Create and use non-root user
-RUN adduser -D nodeuser && \
-    chown -R nodeuser:nodeuser /app && \
-    mkdir -p /usr/share/nginx/html && \
-    chown -R nodeuser:nodeuser /usr/share/nginx/html
+# Runtime stage
+FROM node:18-alpine
 
-COPY public/* /usr/share/nginx/html/
+WORKDIR /app
 
-USER nodeuser
+RUN apk add --no-cache bash curl && \
+    mkdir -p /app/logs
+
+# Copy from build stage
+COPY --from=build /app /app
+
+# Create public directory if needed
+RUN mkdir -p /app/public && \
+    chown -R node:node /app
+
+# Copy public assets if they exist
+COPY public/ /app/public/
+
+USER node
 
 EXPOSE 3000
 

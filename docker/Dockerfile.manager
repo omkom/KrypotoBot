@@ -1,27 +1,30 @@
 FROM node:18-alpine
 
-# Combine RUN commands to reduce layers
+LABEL maintainer="KryptoBot Team"
+LABEL version="2.0.0"
+LABEL description="Trading Instance Manager Service"
+
+# Install dependencies and create directories in one layer
 RUN apk add --no-cache bash curl docker-cli && \
     mkdir -p /app/logs/instances /app/logs/analysis
 
 WORKDIR /app
 
-# Copy only necessary files using .dockerignore
+# Cache dependencies separately
 COPY package*.json ./
 RUN npm ci --only=production && \
-    npm install --no-save dockerode log-timestamp
+    npm install --no-save dockerode log-timestamp && \
+    npm cache clean --force
 
 COPY . .
 
-# Create non-root user
-RUN addgroup -g 1001 nodeapp && \
-    adduser -u 1001 -G nodeapp -s /bin/sh -D nodeapp && \
-    chown -R nodeapp:nodeapp /app
+# Use standard node user for consistency
+RUN chown -R node:node /app
 
-# Switch to non-root user
-USER nodeapp
+USER node
 
+# Standardized health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl -f http://localhost:9466/health || exit 1
+  CMD curl -sf http://localhost:9466/health || exit 1
 
 CMD ["node", "src/api/instance-manager.js"]

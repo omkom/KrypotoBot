@@ -291,13 +291,15 @@ services:
     container_name: memecoin-web-dashboard
     restart: unless-stopped
     ports:
-      - "8080:8080"
+    #  - "8080:8080"
+      - "3006:3000"
     environment:
       - API_URL=http://monitoring-api:3000/api
     env_file:
       - .env
     volumes:
-      - ./dashboard:/app
+      - ./dashboard:/app  # 🔁 Sync live du code local
+      - /app/node_modules  # ✅ Préserve node_modules dans le conteneur
     networks:
       - trading-network
     healthcheck:

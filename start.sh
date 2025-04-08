@@ -190,6 +190,14 @@ main() {
       check_containers
       start_application $mode
       ;;
+    "rebuild")
+      log "INFO" "Reconstruction complète avec suppression des caches..."
+      docker compose down --volumes --remove-orphans
+      docker image prune -f
+      docker compose build --no-cache
+      docker compose up -d
+      log "SUCCESS" "✓ Reconstruction et redémarrage terminés"
+      ;;
     "stop")
       log "INFO" "Arrêt des conteneurs..."
       docker compose down
@@ -274,6 +282,7 @@ main() {
     "help")
       echo -e "${CYAN}KryptoBot - Options de commande:${NC}"
       echo "  start [mode]  - Démarrer l'application (modes: prod, dev, debug)"
+      echo "  rebuild       - Reconstruit tout à neuf sans cache et relance les conteneurs"
       echo "  stop          - Arrêter tous les conteneurs"
       echo "  restart       - Redémarrer tous les conteneurs"
       echo "  logs          - Afficher les logs des conteneurs"
