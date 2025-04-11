@@ -134,11 +134,11 @@ start_application() {
   case $mode in
     "prod"|"production")
       log "INFO" "Mode PRODUCTION - Démarrage en arrière-plan"
-      docker compose up -d
+      docker compose up -d --privileged
       ;;
     "dev"|"development")
       log "INFO" "Mode DÉVELOPPEMENT - Affichage des logs en direct"
-      docker compose up
+      docker compose up --privileged
       ;;
     "debug")
       # Créer un fichier .env.debug avec DEBUG=true
@@ -150,7 +150,7 @@ start_application() {
       fi
       
       log "INFO" "Mode DEBUG - Exécution avec DRY_RUN=true et logs détaillés"
-      docker compose --env-file .env.debug up
+      docker compose --env-file .env.debug up --privileged
       ;;
     *)
       log "ERROR" "Mode inconnu: $mode. Utilisez 'prod', 'dev' ou 'debug'."

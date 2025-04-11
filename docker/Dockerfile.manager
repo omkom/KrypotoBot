@@ -4,6 +4,10 @@ LABEL maintainer="KryptoBot Team"
 LABEL version="2.0.0"
 LABEL description="Trading Instance Manager Service"
 
+RUN apk add --no-cache shadow && \
+    groupadd -g 998 docker && \
+    usermod -aG docker node
+
 # Install dependencies and create directories in one layer
 RUN apk add --no-cache bash curl docker-cli && \
     mkdir -p /app/logs/instances /app/logs/analysis
